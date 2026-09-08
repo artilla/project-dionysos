@@ -25,7 +25,7 @@ function escapeCookie(value) {
   return [...value].map(c => /[A-Za-z0-9@*_+./-]/.test(c) ? c : c.charCodeAt(0) < 256 ? `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}` : `%u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join('');
 }
 export class Foresttrip {
-  constructor(state, transport = fetch) {
+  constructor(state, transport = (...args) => fetch(...args)) {
     this.jar = state?.cookies ? CookieJar.deserializeSync(state.cookies) : new CookieJar();
     this.csrf = state?.csrf || '';
     this.catalog = state?.catalog || null;
@@ -41,7 +41,13 @@ export class Foresttrip {
       let response;
       try {
         response = await this.transport(url, { method, body, redirect: 'manual', signal: AbortSignal.timeout(25000), headers: { Referer: MONTH_URL, ...headers, ...(cookie ? { Cookie: cookie } : {}) } });
-      } catch { throw new SourceError('NETWORK', '숲나들e 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.'); }
+      } catch (error) {
+        if (/Illegal invocation|incorrect.*this/i.test(error?.message || '')) {
+          throw new SourceError('SOURCE_REQUEST_ERROR', '서버에서 숲나들e 연결 요청을 처리하지 못했습니다.', 500);
+        }
+        const timedOut = ['TimeoutError', 'AbortError'].includes(error?.name);
+        throw new SourceError('NETWORK', timedOut ? '숲나들e 응답 대기 시간이 초과됐습니다. 잠시 후 다시 시도해주세요.' : '숲나들e에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.');
+      }
       for (const item of response.headers.getSetCookie()) this.jar.setCookieSync(item, url, { ignoreError: true });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         url = new URL(response.headers.get('location'), url).href;
