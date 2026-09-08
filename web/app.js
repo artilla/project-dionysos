@@ -147,13 +147,15 @@ function renderConnection(){
  $('connectionHint').textContent=session.configured?`${accountStorage()}에 저장한 계정으로 다시 연결합니다. 연결을 해제해도 저장된 계정은 유지돼요.`:`처음 연결할 때 숲나들e ID와 비밀번호를 입력해주세요. 로그인에 성공하면 ${accountStorage()}에 암호화해 저장합니다.`;
  $('savedAccount').hidden=!session.configured;$('savedAccount').textContent=session.configured?`저장된 계정 · ${session.accountLabel||'등록됨'}`:'';
  for(const id of ['changeAccount','forgetAccount']){$(id).hidden=!session.configured;$(id).disabled=busy||running;}
- $('savedSummary').textContent=data.forests.length?'저장된 현황에서 조건을 바꿔 찾아보세요.':'현황을 가져오면 아래에서 결과를 찾아볼 수 있어요.';
+ $('savedSummary').textContent=!session.connected?'상단의 ‘숲나들e 연결’ 버튼에서 계정을 연결하고 월별 현황을 가져오세요.':data.forests.length?'저장된 현황에서 조건을 바꿔 찾아보세요.':'위에서 여행 조건을 고르고 검색하면 현황을 가져올 수 있어요.';
  $('sync').textContent=running?'검색 중':'검색';
  const needsConnection=!session.connected&&!busy;
  document.querySelector('.source-status').classList.toggle('needs-connection',needsConnection);
- $('sourceHint').hidden=!needsConnection&&!running&&job?.status!=='running';
- $('sourceHint').innerHTML=needsConnection?'새 현황을 검색하려면 먼저 연결해주세요. <button class="text-button" data-show-connection>연결 관리 열기</button>':running?'선택한 범위의 현황을 가져오는 중이에요. 결과 내 검색은 계속 사용할 수 있어요.':'진행 중이던 조회가 저장되어 있어요. 아래에서 이어서 조회할 수 있습니다.';
- $('connect').textContent=session.connected?'다시 연결':'숲나들e 연결';$('connect').disabled=busy||running;$('sync').disabled=!session.connected||busy||running||cardUpdate?.status==='running'||job?.status==='running';$('syncAll').disabled=$('sync').disabled||!session.catalog?.months?.length;$('disconnect').hidden=!session.connected;$('disconnect').disabled=running||busy;
+ $('sourceHint').hidden=needsConnection||(!running&&job?.status!=='running');
+ $('sourceHint').textContent=running?'선택한 범위의 현황을 가져오는 중이에요. 결과 내 검색은 계속 사용할 수 있어요.':'진행 중이던 조회가 저장되어 있어요. 아래에서 이어서 조회할 수 있습니다.';
+ $('headerConnectionStatus').textContent=busy?'연결 중':session.connected?'연결됨':'연결 필요';
+ $('headerConnectionStatus').classList.toggle('connected',!!session.connected);
+ $('connect').textContent=busy?'연결 중…':session.connected?'다시 연결':'숲나들e 연결';$('connect').classList.toggle('is-connected',!!session.connected);$('connect').setAttribute('aria-busy',String(busy));$('connect').disabled=busy||running;$('sync').disabled=!session.connected||busy||running||cardUpdate?.status==='running'||job?.status==='running';$('syncAll').disabled=$('sync').disabled||!session.catalog?.months?.length;$('disconnect').hidden=!session.connected;$('disconnect').disabled=running||busy;
  const catalog=session.catalog;
  $('allScope').textContent=catalog?`${catalog.months.map(m=>m.name).join(' · ')} / 전국 ${catalog.regions.length}개 지역 / 숙소·야영장`:'연결하면 조회 가능한 모든 월과 지역을 확인할 수 있어요.';
  $('jobPanel').hidden=!job;if(!job)return;if(shownJobId!==job.id){$('jobPanel').open=!['complete','cancelled'].includes(job.status);shownJobId=job.id;}
@@ -329,7 +331,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)r
  if(b.dataset.sourceType){sourceDraft.type=b.dataset.sourceType;renderSource();}
  else if(b.dataset.updateForest)updateForest(b.dataset.updateForest);
  else if(b.hasAttribute('data-show-job')){$('jobPanel').open=true;$('jobPanel').scrollIntoView({block:'center',behavior:'smooth'});$('jobPanel').querySelector('summary').focus({preventScroll:true});}
- else if(b.hasAttribute('data-show-connection')){$('sourceOptions').open=true;$('connect').focus();}
+ else if(b.hasAttribute('data-show-connection')){$('sourceOptions').open=false;$('connect').focus();}
  else if(b.dataset.type){state.type=b.dataset.type;changed();}
  else if(b.dataset.save){const id=b.dataset.save,inDetail=!!b.closest('dialog');toggleSaved(id);(inDetail?$('detail'):$('cards')).querySelector(`[data-save="${CSS.escape(id)}"]`)?.focus({preventScroll:true});}
  else if(b.dataset.open)loadDetail(b.dataset.open,true,Number(b.dataset.date)||null,b);
@@ -338,7 +340,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)r
  else if(b.hasAttribute('data-close'))$('detail').close();
  else if(b.hasAttribute('data-detailretry'))loadDetail(detailId,false);
  else if(b.hasAttribute('data-refresh-forest')){const id=detailId;$('detail').close();updateForest(id);}
- else if(b.dataset.recover){if(b.dataset.recover==='explore'){state.savedOnly=false;render();}else if(b.dataset.recover==='date'){state.day=null;render();}else{useResultConditions();if(!session.connected){$('sourceOptions').open=true;$('connect').focus();}}}
+ else if(b.dataset.recover){if(b.dataset.recover==='explore'){state.savedOnly=false;render();}else if(b.dataset.recover==='date'){state.day=null;render();}else{useResultConditions();if(!session.connected){$('sourceOptions').open=false;$('connect').focus();}}}
 });
 render();
 try{session=await api('/api/session');csrf=session.csrfToken;job=session.job;setCatalog();await refresh();}catch(e){showError(e.message);}renderConnection();
