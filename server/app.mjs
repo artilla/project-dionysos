@@ -211,11 +211,9 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
   }
   async function availability(query, forestId) {
     const catalog = await store.get('catalog');
-    const prefixes = ['forest:%', `snapshot:${query.month}:%`, ...(query.nights > 1 ? [`snapshot:${nextMonth(query.month)}:%`] : [])];
+    const prefixes = ['forest:', `snapshot:${query.month}:`, ...(query.nights > 1 ? [`snapshot:${nextMonth(query.month)}:`] : [])];
     // Read the same committed generation even when a multi-month update finishes mid-request.
-    let rows;
-    try { rows = (await store.db.prepare(`SELECT key,value FROM kv WHERE key = ? OR ${prefixes.map(() => 'key LIKE ?').join(' OR ')} ORDER BY key`).bind(store.key('job'),...prefixes.map(prefix=>store.key(prefix))).all()).results; }
-    catch (error) { console.error('Availability read failed', { message: error.message }); throw error; }
+    const rows = (await store.db.prepare(`SELECT key,value FROM kv WHERE key = ? OR ${prefixes.map(() => '(key >= ? AND key < ?)').join(' OR ')} ORDER BY key`).bind(store.key('job'),...prefixes.flatMap(prefix=>store.prefixRange(prefix))).all()).results;
     const forests = rows.filter(r => r.key.startsWith(store.key('forest:'))).map(r => JSON.parse(r.value)).filter(f => (query.region === 'all' || f.regionId === query.region) && (!forestId || f.id === forestId));
     const snapshots = rows.filter(r => r.key.startsWith(store.key('snapshot:'))).map(r => JSON.parse(r.value));
     const jobRow = rows.find(r => r.key === store.key('job')), job = jobRow ? JSON.parse(jobRow.value) : null;

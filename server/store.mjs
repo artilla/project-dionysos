@@ -4,6 +4,11 @@ const base64ToBytes = value => Uint8Array.from(atob(value), c => c.charCodeAt(0)
 export class Store {
   constructor(db, secret, namespace = '') { if (!/^[a-zA-Z0-9-]*$/.test(namespace)) throw new Error('Invalid storage namespace'); this.db = db; this.secret = secret; this.namespace = namespace; }
   key(key) { return this.namespace ? `${this.namespace}:${key}` : key; }
+  prefixRange(prefix) {
+    const start = this.key(prefix);
+    // Keys are ASCII. A half-open index range avoids D1's 50-byte LIKE limit.
+    return [start, start ? start.slice(0, -1) + String.fromCharCode(start.charCodeAt(start.length - 1) + 1) : '\uffff'];
+  }
   async init() {
     await this.db.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
     await this.db.exec('CREATE TABLE IF NOT EXISTS leases (key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);');
@@ -11,7 +16,7 @@ export class Store {
   async get(key) { const row = await this.db.prepare('SELECT value FROM kv WHERE key = ?').bind(this.key(key)).first(); return row ? JSON.parse(row.value) : null; }
   async set(key, value) { await this.db.prepare('INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(this.key(key), JSON.stringify(value)).run(); }
   async remove(key) { await this.db.prepare('DELETE FROM kv WHERE key=?').bind(this.key(key)).run(); }
-  async list(prefix) { const rows = await this.db.prepare('SELECT value FROM kv WHERE key LIKE ? ORDER BY key').bind(`${this.key(prefix)}%`).all(); return rows.results.map(r => JSON.parse(r.value)); }
+  async list(prefix) { const rows = await this.db.prepare('SELECT value FROM kv WHERE key >= ? AND key < ? ORDER BY key').bind(...this.prefixRange(prefix)).all(); return rows.results.map(r => JSON.parse(r.value)); }
   async lock(key, owner) {
     const result = await this.db.prepare('INSERT INTO leases(key,owner,expires) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET owner=excluded.owner, expires=excluded.expires WHERE leases.expires < ?').bind(this.key(key), owner, Date.now() + 180000, Date.now()).run();
     return result.meta.changes > 0;

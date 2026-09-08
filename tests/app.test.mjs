@@ -255,6 +255,11 @@ test('selection-wide collection still publishes successful batches before comple
 test('public visitors isolate credentials, CSRF, jobs, results and account deletion',async t=>{
  const {createWorker}=await import('../server/worker.mjs');
  const db=sqlite(':memory:');t.after(()=>db.close());
+ const prepare=db.prepare.bind(db);
+ db.prepare=sql=>({bind(...args){
+  if (/\bLIKE\b/i.test(sql)) assert.ok(args.every(value=>typeof value!=='string'||Buffer.byteLength(value)<=50),'D1 limits LIKE patterns to 50 bytes');
+  return prepare(sql).bind(...args);
+ }});
  const env={DB:db,SESSION_SECRET:'public-test-secret-'.repeat(4),ASSETS:{fetch:async()=>new Response('public')}};
  const worker=createWorker(options=>createApp({...options,sourceFactory:auth=>new FixtureSource(auth)}));
  async function visitor(){
@@ -264,11 +269,15 @@ test('public visitors isolate credentials, CSRF, jobs, results and account delet
   return {call,getCookie:()=>cookie,getCsrf:()=>csrf};
  }
  const a=await visitor(),b=await visitor();assert.notEqual(a.getCookie(),b.getCookie());assert.notEqual(a.getCsrf(),b.getCsrf());
+ const empty=await a.call('/api/availability');assert.equal(empty.status,200);assert.deepEqual(empty.data.forests,[]);
  await a.call('/api/session/connect',{id:'visitor-a',password:'a-secret'});await b.call('/api/session/connect',{id:'visitor-b',password:'b-secret'});
  assert.equal((await a.call('/api/session/connect',{}, {'X-CSRF-TOKEN':b.getCsrf()})).status,403);
  const month=kstToday().slice(0,6);await a.call('/api/sync',{month,type:'stay'});assert.equal((await finish(a.call)).status,'complete');
  assert.equal((await a.call('/api/availability?month='+month)).data.forests.length,1);
  assert.equal((await b.call('/api/availability?month='+month)).data.forests.length,0);assert.equal((await b.call('/api/session')).data.job,null);
+ const aId=a.getCookie().split('=')[1].split('.')[0],bId=b.getCookie().split('=')[1].split('.')[0];
+ assert.equal((await new Store(db,env.SESSION_SECRET,aId).list('forest:')).length,1);
+ assert.deepEqual(await new Store(db,env.SESSION_SECRET,bId).list('forest:'),[]);
  await a.call('/api/sync',{month,type:'stay',forestId:'0101'});assert.equal((await finish(a.call)).status,'complete');
  assert.equal((await a.call('/api/availability?month='+month)).data.forests.length,1);assert.equal((await b.call('/api/availability?month='+month)).data.forests.length,0);
  await a.call('/api/session/forget',{});assert.equal((await a.call('/api/session')).data.configured,false);assert.equal((await b.call('/api/session')).data.configured,true);assert.equal((await b.call('/api/session/connect',{})).status,200);
