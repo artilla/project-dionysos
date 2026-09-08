@@ -1,0 +1,15 @@
+.account-dialog{width:460px;max-width:calc(100% - 32px);max-height:calc(100dvh - 32px);padding:28px;overflow:auto}
+.account-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}
+.account-head h2{font-size:22px;letter-spacing:-.6px}
+.account-head .close-btn{width:40px;height:40px}
+.account-description{font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:22px}
+.account-dialog form>label{display:block;font-size:13px;font-weight:650;margin:18px 0 7px}
+.account-dialog form>input{display:block;width:100%;min-width:0;min-height:46px;padding:10px 12px;border-radius:8px;color:var(--ink);background:#fff;font-size:16px}
+.account-save-note{font-size:12px;line-height:1.75;color:var(--muted);background:var(--paper);padding:13px 14px;border-radius:8px;margin-top:20px}
+.account-actions{display:flex;gap:10px;margin-top:24px}
+.account-actions button{min-height:46px}
+.account-actions .primary{flex:1}
+.account-delete{background:#8b453a}
+.connection-line .saved-account{font-size:12px;font-weight:600;color:var(--green);margin-top:12px;overflow-wrap:anywhere}
+.connection-actions .forget-account{color:#8b453a;min-height:44px}
+@media(max-width:480px){.account-dialog{padding:22px}.account-head h2{font-size:20px}.account-description{margin-bottom:18px}}
