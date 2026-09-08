@@ -334,6 +334,10 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
         job.updatedAt = now(); await store.set('job', job); return response({ job: publicJob(job) });
       });
       return response({ error: { code: 'NOT_FOUND', message: '요청한 기능을 찾을 수 없습니다.' } }, 404);
-    } catch (error) { return response({ error: safeError(error) }, error.status || 500); }
+    } catch (error) {
+      // Keep request data, credentials and upstream response text out of logs.
+      if (!(error instanceof SourceError)) console.error('API failure', { path, name: error.name, frames: error.stack?.split('\n').slice(1, 4) });
+      return response({ error: safeError(error) }, error.status || 500);
+    }
   };
 }
