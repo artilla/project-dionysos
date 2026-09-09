@@ -137,15 +137,29 @@ function render(){
  if(matches.length)$('cards').innerHTML=matches.map(card).join('');
  else{const noSaves=state.savedOnly&&!saved.size;const missing=!c.discovered||c.pending||c.missingRegions;
  // A browser that never connected is told to connect, not that data is missing or empty.
- if(!noSaves&&connectRequired)$('cards').innerHTML=`<div class="empty" data-state="connect-required"><div class="empty-icon">${icon('leaf',26)}</div><h3>숲나들e 연결이 필요해요</h3><p>함께 모은 월별 현황은 숲나들e를 한 번 연결한 브라우저에서 볼 수 있어요.<br>연결 후에는 연결을 해제해도 저장된 결과를 계속 볼 수 있습니다.</p><button class="primary" data-recover="connect">숲나들e 연결 ${icon('arrow',15)}</button></div>`;
+ if(!noSaves&&(connectRequired||(!data.dataCoverage?.state&&!session.connected&&!data.forests.length)))$('cards').innerHTML=`<div class="empty" data-state="connect-required"><div class="empty-icon">${icon('leaf',26)}</div><h3>숲나들e 연결이 필요해요</h3><p>함께 모은 월별 현황은 숲나들e를 한 번 연결한 브라우저에서 볼 수 있어요.<br>연결 후에는 연결을 해제해도 저장된 결과를 계속 볼 수 있습니다.</p><button class="primary" data-recover="connect">숲나들e 연결 ${icon('arrow',15)}</button></div>`;
  else $('cards').innerHTML=`<div class="empty"><div class="empty-icon">${icon(noSaves?'heart':'leaf',26)}</div><h3>${noSaves?'아직 찜한 숲이 없어요':!session.connected&&!data.forests.length?'이번 달, 어디로 떠날까요?':missing?'아직 가능한 숲을 확인하지 못했어요':'이 조건에 가능한 숲이 없어요'}</h3><p>${noSaves?'마음에 드는 휴양림의 하트를 눌러보세요.':!session.connected?'위에서 숲나들e를 연결하고 월별 조회를 시작해주세요.':running?'시설을 차례로 확인 중입니다. 완료한 범위부터 표시해요.':missing?'조회하지 않은 범위가 남아 있어요.<br>위에서 조회를 시작하거나 이어서 조회해주세요.':'다른 날짜나 인원·숙박일수로 찾아보세요.'}</p><button class="secondary" data-recover="${noSaves?'explore':state.day?'date':'conditions'}">${noSaves?'휴양림 둘러보기':state.day?'한 달 전체 보기':'조회 조건으로 이동'} ${icon('arrow',15)}</button></div>`;}
  renderConnection();
 }
+function setQueryExpanded(kind,expanded){
+ const source=kind==='source';
+ $(source?'sourceForm':'resultFilterPanel').dataset.collapsed=String(!expanded);
+ const toggle=$(source?'sourceToggle':'resultToggle');toggle.setAttribute('aria-expanded',String(expanded));
+ toggle.textContent=`${source?'조건':'필터'} ${expanded?'접기':'펼치기'}`;
+ if(!expanded&&!source)closeRegionPicker();
+}
+function querySummary(value){
+ const regions=selectedRegionIds(value.region),catalog=session.catalog;
+ const region=regions.length?(catalog?.regions.find(r=>r.id===regions[0])?.name||regions[0])+(regions.length>1?` 외 ${regions.length-1}개 지역`:''):'전국';
+ return `${Number(value.month.slice(4))}월 · ${region} · ${{all:'숙소·야영장',stay:'숙소',camp:'야영장'}[value.type]} · ${value.guests}명 · ${value.nights}박`;
+}
 function renderSource(){
+ $('sourceSummary').textContent=querySummary(sourceDraft);
+ $('resultSummary').textContent=querySummary(state)+(state.weekend?' · 금·토 출발':'')+(waitIncluded()?' · 대기 포함':'')+(state.search?` · “${state.search}”`:'');
  for(const key of ['month','region','guests','nights']){const input=$('source'+key[0].toUpperCase()+key.slice(1));if(input.querySelector(`option[value="${sourceDraft[key]}"]`))input.value=sourceDraft[key];}
  document.querySelectorAll('[data-source-type]').forEach(b=>{const active=b.dataset.sourceType===sourceDraft.type;b.classList.toggle('active',active);b.setAttribute('aria-pressed',active);});
 }
-function useResultConditions(){const multiple=selectedRegionIds(state.region).length>1;sourceDraft={...sourceValues(state),region:multiple?sourceDraft.region:state.region};if(multiple)notify('여행 조건을 불러왔어요. 새 현황을 조회할 지역은 위에서 선택해주세요.');renderSource();$('sourceOptions').open=false;$('sourceForm').scrollIntoView({block:'center',behavior:'smooth'});$('sourceMonth').focus({preventScroll:true});}
+function useResultConditions(){const multiple=selectedRegionIds(state.region).length>1;sourceDraft={...sourceValues(state),region:multiple?sourceDraft.region:state.region};if(multiple)notify('여행 조건을 불러왔어요. 새 현황을 조회할 지역은 위에서 선택해주세요.');renderSource();setQueryExpanded('source',true);$('sourceOptions').open=false;$('sourceForm').scrollIntoView({block:'center',behavior:'smooth'});$('sourceMonth').focus({preventScroll:true});}
 function renderConnection(){
  renderSource();renderCardUpdates();
  $('copyResult').textContent=selectedRegionIds(state.region).length>1?'월·유형·인원·숙박일수 불러오기':'현재 결과 조건 불러오기';
@@ -153,9 +167,10 @@ function renderConnection(){
  $('connectionHint').textContent=session.configured?`${accountStorage()}에 저장한 계정으로 다시 연결합니다. 연결을 해제해도 저장된 계정은 유지돼요.`:`처음 연결할 때 숲나들e ID와 비밀번호를 입력해주세요. 로그인에 성공하면 ${accountStorage()}에 암호화해 저장합니다.`;
  $('savedAccount').hidden=!session.configured;$('savedAccount').textContent=session.configured?`저장된 계정 · ${session.accountLabel||'등록됨'}`:'';
  for(const id of ['changeAccount','forgetAccount']){$(id).hidden=!session.configured;$(id).disabled=busy||running;}
- $('savedSummary').textContent=!session.connected?'상단의 ‘숲나들e 연결’ 버튼에서 계정을 연결하고 월별 현황을 가져오세요.':data.forests.length?'저장된 현황에서 조건을 바꿔 찾아보세요.':'위에서 여행 조건을 고르고 검색하면 현황을 가져올 수 있어요.';
+ $('savedSummary').textContent=!session.connected?'계정을 연결하면 월별 현황을 가져올 수 있어요. 저장된 결과는 연결 없이도 볼 수 있습니다.':data.forests.length?'저장된 현황에서 조건을 바꿔 찾아보세요.':'아래 ‘새 현황 검색’에서 여행 조건을 고르면 현황을 가져올 수 있어요.';
  $('sync').textContent=running?'검색 중':'검색';
- const needsConnection=!session.connected&&!busy;
+ const needsConnection=!session.connected;
+ $('connectInline').hidden=!needsConnection;$('connectInline').disabled=busy||running;$('connectInline').textContent=busy?'연결 중…':'숲나들e 연결';$('connectInline').setAttribute('aria-busy',String(busy));
  document.querySelector('.source-status').classList.toggle('needs-connection',needsConnection);
  $('sourceHint').hidden=needsConnection||(!running&&job?.status!=='running');
  $('sourceHint').textContent=running?'선택한 범위의 현황을 가져오는 중이에요. 결과 내 검색은 계속 사용할 수 있어요.':'진행 중이던 조회가 저장되어 있어요. 아래에서 이어서 조회할 수 있습니다.';
@@ -200,8 +215,9 @@ async function connect(credentials){
  if(!credentials&&!session.configured){openAccount();return;}
  const entered=!!credentials;busy=true;showError('');accountError('');if(entered)setAccountPending(true);renderConnection();
  try{const result=await api('/api/session/connect',credentials||{});session={...session,...result};setCatalog();
+  setQueryExpanded('source',true);
   if(entered){setAccountPending(false);accountReturnFocus=$('sourceMonth');closeAccount();}
-  await refresh();showRecovery(null);notify(entered?'계정을 저장하고 연결했어요. 조회 조건을 골라주세요.':'숲나들e에 다시 연결했어요. 조회를 시작하거나 이어서 진행해주세요.');
+  await refresh();$('sourceForm').scrollIntoView({block:'center',behavior:'smooth'});$('sourceMonth').focus({preventScroll:true});showRecovery(null);notify(entered?'계정을 저장하고 연결했어요. 조회 조건을 골라주세요.':'숲나들e에 다시 연결했어요. 조회를 시작하거나 이어서 진행해주세요.');
  }catch(e){
   if(entered){accountError(e.message);}
   else{if(e.code==='AUTH_REQUIRED')session.connected=false;showError(e.message);if(e.code==='CREDENTIALS_REQUIRED')session.configured=false;if(['CREDENTIALS_REQUIRED','AUTH_REQUIRED'].includes(e.code))openAccount();}
@@ -317,7 +333,9 @@ for(const [id,delta] of [['prevMonth',-1],['nextMonth',1]])$(id).addEventListene
 function reset(){Object.assign(state,{region:'all',type:'all',guests:2,nights:1,weekend:false,includeWait:false,search:'',day:null,sort:'days'});$('search').value='';changed();}
 $('reset').addEventListener('click',reset);$('brand').addEventListener('click',e=>{e.preventDefault();state.savedOnly=false;reset();window.scrollTo({top:0,behavior:'smooth'});});
 for(const [id,only] of [['exploreNav',false],['savedNav',true]])$(id).addEventListener('click',()=>{state.savedOnly=only;state.day=null;render();});
-for(const key of ['month','region','guests','nights'])$('source'+key[0].toUpperCase()+key.slice(1)).addEventListener('change',e=>{sourceDraft[key]=['guests','nights'].includes(key)?Number(e.target.value):e.target.value;});
+for(const key of ['month','region','guests','nights'])$('source'+key[0].toUpperCase()+key.slice(1)).addEventListener('change',e=>{sourceDraft[key]=['guests','nights'].includes(key)?Number(e.target.value):e.target.value;renderSource();});
+for(const kind of ['source','result'])$(kind+'Toggle').addEventListener('click',()=>setQueryExpanded(kind,$(kind+'Toggle').getAttribute('aria-expanded')!=='true'));
+$('connectInline').addEventListener('click',()=>connect());
 $('sourceReset').addEventListener('click',()=>{sourceDraft={...sourceDraft,region:'all',type:'all',guests:2,nights:1};renderSource();});
 $('copyResult').addEventListener('click',useResultConditions);
 $('sourceForm').addEventListener('submit',e=>{e.preventDefault();if(!$('sync').disabled)run('start',undefined,sourceDraft);});

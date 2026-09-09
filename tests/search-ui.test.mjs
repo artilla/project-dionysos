@@ -61,6 +61,43 @@ async function setup(options = {}) {
 
 const settled = () => new Promise(resolve=>setImmediate(resolve));
 
+test('collapsed query panels preserve independent drafts and reveal copied conditions',async()=>{
+ const h=await setup({catalog:{...catalog,regions:[...catalog.regions,{id:'9',name:'제주'}]}});
+ h.click('#sourceToggle');h.change('sourceRegion','2');h.change('sourceGuests','6');
+ h.click('#sourceToggle');h.click('#resultToggle');h.change('guests','8');h.chooseRegion('1');h.chooseRegion('2');
+ h.click('#resultToggle');await h.app.refresh();
+ assert.match(h.$('sourceSummary').textContent,/강원.*6명/);
+ assert.match(h.$('resultSummary').textContent,/서울\/인천\/경기 외 1개 지역.*8명/);
+ assert.equal(h.$('sourceToggle').getAttribute('aria-expanded'),'false');
+ assert.equal(h.$('resultToggle').getAttribute('aria-expanded'),'false');
+ h.click('#copyResult');
+ assert.equal(h.$('sourceToggle').getAttribute('aria-expanded'),'true');
+ assert.equal(h.$('sourceGuests').value,'8');assert.equal(h.$('sourceRegion').value,'2');
+ assert.equal(h.requests.some(r=>r.path==='/api/sync'),false);
+});
+
+test('inline connection can be cancelled and successful connection reveals collection fields',async()=>{
+ const h=await setup({session:{connected:false,configured:false}});
+ assert.equal(h.$('connectInline').hidden,false);
+ h.click('#connectInline');assert.equal(h.$('accountDialog').open,true);
+ h.click('#cancelAccount');assert.equal(h.$('accountDialog').open,false);
+ assert.equal(h.requests.some(r=>r.path==='/api/session/connect'),false);
+ h.click('#connectInline');h.$('accountId').value='fixture-id';h.$('accountPassword').value='fixture-password';h.submit('accountForm');await settled();
+ assert.equal(h.$('connectInline').hidden,true);
+ assert.equal(h.$('sourceToggle').getAttribute('aria-expanded'),'true');
+ assert.equal(h.$('sync').disabled,false);
+ assert.equal(h.$('accountDialog').open,false);
+});
+
+test('initial availability errors still offer direct connection from the empty card',async()=>{
+ const h=await setup({session:{connected:false,configured:false},fetch:async({path})=>path.startsWith('/api/availability?')?{ok:false,json:async()=>({error:{code:'SOURCE_ERROR',message:'조회 요청 실패'}})}:undefined});
+ assert.match(h.$('connectionError').textContent,/조회 요청 실패/);
+ h.click('[data-recover="connect"]');assert.equal(h.$('accountDialog').open,true);
+ assert.equal(h.requests.some(r=>r.path==='/api/session/connect'),false);
+ const knownEmpty=await setup({session:{connected:false,configured:true},fetch:async({path})=>path.startsWith('/api/availability?')?{ok:true,json:async()=>({forests:[],coverage:{},dataCoverage:{state:'empty'}})}:undefined});
+ assert.notEqual(knownEmpty.$('cards').querySelector('.empty').dataset.state,'connect-required');
+});
+
 test('first connection collects credentials, shows progress and stores nothing in browser storage',async()=>{
  const pending=deferred();
  const h=await setup({session:{connected:false,configured:false},fetch:async({path})=>{if(path==='/api/session/connect'){await pending.promise;}}});

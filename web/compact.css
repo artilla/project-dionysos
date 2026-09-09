@@ -1,0 +1,40 @@
+/* Keep collection and local filtering distinct, without two open forms on phones. */
+.query-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+.query-heading h2{font-size:17px}
+.query-heading p{font-size:12px;color:var(--muted);margin-top:4px}
+.query-toggle,.query-summary{display:none}
+.source-status{margin:0 0 16px}
+.inline-connect{margin-top:14px;min-height:46px;font-size:14px}
+@media(max-width:600px){
+ .intro{min-height:0;padding:24px 0}
+ .intro p{max-width:none;word-break:keep-all;font-size:14px}
+ .query-heading,.result-filter-heading{align-items:flex-start;margin-bottom:16px}
+ .query-heading>div,.result-filter-heading>div{min-width:0}
+ .query-heading h2,.result-filter-heading h2{font-size:16px}
+ .query-heading p,.result-filter-heading p{font-size:13px;line-height:1.6;word-break:keep-all}
+ .query-toggle{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;min-height:44px;padding:8px 10px;border-radius:8px;background:#f5f8f0;font-size:13px;font-weight:600;color:var(--green)}
+ .query-panel[data-collapsed=true] .query-body{display:none}
+ .query-panel[data-collapsed=true] .query-summary{display:block;font-size:14px;line-height:1.65;color:var(--muted);word-break:keep-all;overflow-wrap:anywhere}
+ .query-panel[data-collapsed=true] .query-heading,.query-panel[data-collapsed=true] .result-filter-heading{margin-bottom:10px}
+ .result-filter-panel{margin-top:16px}
+ .instant-filter{display:none}
+ .source-status{padding:16px;margin:0 0 16px}
+ .source-status .saved-status>span:last-child{font-size:14px;word-break:keep-all}
+ .inline-connect{width:100%}
+ .query-fields .field label,.query-fields .field-label{font-size:14px;letter-spacing:0}
+ .query-fields .field select,.region-toggle{font-size:16px}
+ .region-multiple{font-size:12px}
+ .query-fields .field .region-option{font-size:14px}
+ .region-panel-head button{min-height:44px;font-size:14px}
+ .result-filter-bottom .search-field{min-height:44px}
+ .result-filter-bottom .search-field input{font-size:16px}
+ .result-filter-bottom .result-filters{width:100%;gap:4px 16px}
+ .result-filter-bottom .weekend{min-height:44px;font-size:14px}
+ .result-filter-bottom .weekend input{width:36px;height:22px;flex-shrink:0}
+ .result-filter-bottom .weekend input:before{width:16px;height:16px}
+ .result-filter-bottom .weekend input:checked:before{transform:translateX(14px)}
+ .result-filter-bottom .reset,.source-actions .reset{min-height:44px;padding:8px 4px;font-size:14px}
+ .result-filter-panel .wait-hint{font-size:13px}
+ .source-options>summary{font-size:13px}
+ .empty{padding:32px 20px}
+}
