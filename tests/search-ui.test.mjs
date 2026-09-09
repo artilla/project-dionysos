@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { createApiClient } from '../web/connection.js';
-import { normalizeRegions, selectedRegionIds, fetchRegionAvailability } from '../web/regions.js';
+import { normalizeRegions, selectedRegionIds, fetchRegionAvailability, withPersonalState } from '../web/regions.js';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
@@ -24,14 +24,14 @@ async function setup(options = {}) {
   window.HTMLElement.prototype.scrollIntoView = function () {};
   window.HTMLElement.prototype.focus = function () {};
   for (const d of document.querySelectorAll('dialog')) { Object.defineProperty(d,'open',{get:()=>d.hasAttribute('open')});d.showModal = () => d.setAttribute('open', ''); d.close = () => {d.removeAttribute('open');d.dispatchEvent(new window.Event('close'));}; }
-  const requests = [], filterUrls = [], storageWrites=[];
+  const requests = [], filterUrls = [], storageWrites=[], priceInvalidations=[];
   let sessionState={connected:true,configured:true,...options.session};
   let currentJob = options.job || jobFor({}, 'previous');
   const context = vm.createContext({ document, window, console, URLSearchParams, Intl, Date, CSS: { escape: x => x },
     location: { pathname: '/', search: '?month=202610&region=all&type=all&guests=4&nights=1' },
     history: { replaceState(_state, _title, url) { filterUrls.push(url); } }, localStorage: { getItem: () => '[]', setItem(...args) {storageWrites.push(args);} },
     setTimeout(fn, ms) { if ([350,1000,2000,4000].includes(ms)) queueMicrotask(fn); return 1; }, clearTimeout() {},
-    observePrices: () => () => {}, createApiClient, normalizeRegions, selectedRegionIds, fetchRegionAvailability,
+    observePrices: () => () => {}, invalidatePrices: id => priceInvalidations.push(id), createApiClient, normalizeRegions, selectedRegionIds, fetchRegionAvailability, withPersonalState,
     async fetch(path, init) {
       const body = init.body && JSON.parse(init.body); requests.push({ path, body });
       const override=await options.fetch?.({path,body,job:currentJob,setJob:value=>{currentJob=value;}});if(override!==undefined)return override;
@@ -56,7 +56,7 @@ async function setup(options = {}) {
   const change = (id, value) => { $(id).value = value; $(id).dispatchEvent(new window.Event('change', { bubbles: true })); };
   const regionCheckbox = id => document.querySelector(`[data-result-region][value="${id}"]`);
   const chooseRegion = (id, checked = true) => { const input = regionCheckbox(id); input.checked = checked; input.dispatchEvent(new window.Event('change', { bubbles: true })); };
-  return { app, $, requests, filterUrls, storageWrites, change, chooseRegion, regionCheckbox, submit:id=>$(id).dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true})), click: selector => document.querySelector(selector).click() };
+  return { app, $, requests, filterUrls, storageWrites, priceInvalidations, change, chooseRegion, regionCheckbox, submit:id=>$(id).dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true})), click: selector => document.querySelector(selector).click() };
 }
 
 const settled = () => new Promise(resolve=>setImmediate(resolve));
@@ -300,6 +300,7 @@ test('a lost accepted card update response reconnects Foresttrip once without st
   assert.equal(h.requests.filter(r=>r.path==='/api/sync').length,1);
   assert.equal(h.requests.filter(r=>r.path==='/api/session/connect').length,1);
   assert.equal(h.$('cardUpdateNotice').dataset.state,'complete');
+  assert.deepEqual(h.priceInvalidations,['forest-1']);
   assert.match(h.$('networkMessage').textContent,/숲나들e.*다시 연결.*업데이트를 마쳤/s);
 });
 
@@ -367,4 +368,30 @@ test('source restrictions are not automatically retried or reconnected',async()=
   await h.app.updateForest('forest-1');
   assert.equal(h.requests.some(r=>['/api/job/retry','/api/session/connect'].includes(r.path)),false);
   assert.equal(h.$('cardUpdateNotice').dataset.state,'error');
+});
+
+test('a never-connected browser sees a connect prompt with a connect button instead of a missing-data message',async()=>{
+  const availability={forests:[],coverage:{discovered:0,complete:0,pending:0,missingRegions:1,regionTotal:1},dataCoverage:{state:'connect-required',sharedScopes:0,fallbackScopes:0,missingScopes:0,emptyScopes:0,legacyForests:0},personal:{job:null,fallbackKeys:[],forests:{}}};
+  const h=await setup({session:{connected:false,configured:false},fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>availability};}});
+  await h.app.refresh();
+  assert.match(h.$('coverageNote').textContent,/한 번 연결한 브라우저/);
+  assert.doesNotMatch(h.$('coverageNote').textContent,/미조회|모아볼/);
+  const empty=h.$('cards').querySelector('.empty');
+  assert.equal(empty.dataset.state,'connect-required');
+  assert.match(empty.querySelector('h3').textContent,/연결이 필요해요/);
+  assert.doesNotMatch(empty.textContent,/확인하지 못했어요|가능한 숲이 없어요|조회하지 않은 범위/);
+  h.click('[data-recover="connect"]');
+  assert.equal(h.$('accountDialog').open,true);assert.equal(h.$('accountTitle').textContent,'숲나들e 연결');
+  assert.equal(h.requests.some(r=>r.path==='/api/session/connect'),false,'no empty login attempt without saved credentials');
+});
+
+test('not-yet-collected and confirmed-empty states keep their own guidance',async()=>{
+  const base={forests:[],coverage:{discovered:0,complete:0,pending:0,missingRegions:1,regionTotal:1},personal:{job:null,fallbackKeys:[],forests:{}}};
+  const incomplete=await setup({fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>({...base,dataCoverage:{state:'incomplete'}})};}});
+  await incomplete.app.refresh();
+  assert.equal(incomplete.$('cards').querySelector('.empty').dataset.state,undefined);
+  assert.match(incomplete.$('cards').textContent,/확인하지 못했어요/);assert.doesNotMatch(incomplete.$('cards').textContent,/연결이 필요해요/);
+  const empty=await setup({fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>({...base,coverage:{discovered:1,complete:1,pending:0,missingRegions:0,regionTotal:1},dataCoverage:{state:'empty'}})};}});
+  await empty.app.refresh();
+  assert.match(empty.$('coverageNote').textContent,/조회된 시설이 없습니다/);assert.doesNotMatch(empty.$('cards').textContent,/연결이 필요해요/);
 });

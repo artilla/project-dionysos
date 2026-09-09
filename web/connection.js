@@ -29,11 +29,11 @@ export function createApiClient({ fetcher = fetch, getCsrf = () => '', getJob = 
     recoveryFailed ||= failed;
     if (!recovering.size) notice(recoveryFailed ? 'failed' : 'recovered');
   }
-  async function request(path, body) {
+  async function request(path, body, requestId) {
     let response;
     try {
       response = await fetcher(path, { method: body === undefined ? 'GET' : 'POST',
-        headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': getCsrf() },
+        headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': getCsrf(), ...(requestId ? { 'X-Request-ID': requestId } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     } catch (error) { throw transportError(error) ? offline() : error; }
     let json;
@@ -76,6 +76,7 @@ export function createApiClient({ fetcher = fetch, getCsrf = () => '', getJob = 
   }
   return async function api(path, input) {
     const body = input === undefined ? undefined : JSON.parse(JSON.stringify(input));
+    const requestId = body !== undefined && /^\/api\/(sync|job\/(step|resume|retry|pause|cancel))$/.test(path) ? crypto.randomUUID() : undefined;
     const baseline = JSON.parse(JSON.stringify(getJob() || null));
     const session = getSession();
     const previousSession = session ? { connected: session.connected, connectedAt: session.connectedAt } : null;
@@ -95,7 +96,7 @@ export function createApiClient({ fetcher = fetch, getCsrf = () => '', getJob = 
               if (recovered) { settled(token, false); return recovered; }
             }
           }
-          const result = await request(path, body);
+          const result = await request(path, body, requestId);
           settled(token, false);
           return result;
         } catch (error) {

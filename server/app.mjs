@@ -1,5 +1,6 @@
 import { Foresttrip, SourceError } from './foresttrip.mjs';
 import { kstToday, monthDates, nextMonth, normalizeDay, normalizeUnit, summarizeForest } from './domain.mjs';
+import { SharedStore, safeSource, cacheKey } from './shared.mjs';
 
 const typeCode = { stay: '01', camp: '02' };
 const now = () => new Date().toISOString();
@@ -10,6 +11,12 @@ const response = (data, status = 200) => Response.json(data, { status, headers: 
 const invalid = message => { throw new SourceError('INVALID_INPUT', message, 400); };
 const safeError = error => error instanceof SourceError ? { code: error.code, message: error.message } : { code: 'INTERNAL', message: '처리 중 문제가 생겼습니다. 저장된 결과는 유지됩니다. 다시 시도해주세요.' };
 const collectionMonths = job => job.months || [job.month, ...(job.nights > 1 ? [nextMonth(job.month)] : [])];
+const rememberRequest = (job, id, action, signature) => { if (id) job.requests = [...(job.requests || []).filter(r => r.id !== id).slice(-63), { id, action, signature }]; };
+const isReplay = (job, id, action, signature) => {
+  const previous = id && job?.requests?.find(r => r.id === id);
+  if (previous && (previous.action !== action || previous.signature !== signature)) invalid('요청 식별자가 다른 작업에 사용됐습니다. 다시 시도해주세요.');
+  return !!previous;
+};
 export function publicJob(job) {
   if (!job) return null;
   const scopes = job.tasks.filter(t => t.kind === 'scope');
@@ -35,7 +42,41 @@ function queryFrom(input, catalog) {
   return query;
 }
 const accountInfo = credentials => ({ configured: !!credentials, accountLabel: credentials ? `${Array.from(credentials.id).slice(0, Math.min(2, credentials.id.length - 1)).join('')}••••` : null });
-export function createApp({ store, sourceFactory = state => new Foresttrip(state), storageLocation = 'local' }) {
+export function createApp({ store, sourceFactory = state => new Foresttrip(state), storageLocation = 'local', shared = new SharedStore(store.db) }) {
+  const catalogForRead = async () => await shared.catalog() || await store.get('catalog');
+  const forestForRead = async id => await shared.forest(id) || await store.get(`forest:${id}`);
+  // Anonymous shared access remains pending a product decision. A retained
+  // personal catalog proves a past successful connection, even after disconnect.
+  const canReadShared = async () => !!await store.get('catalog');
+  async function sourceValue(job, work, kind, input, load) {
+    const key = await cacheKey({ kind, input });
+    const cached = !targeted(job) && !job.forceSource ? await shared.cached('source', key) : null;
+    if (cached) {
+      work.sourceObservedAt = cached.observedAt;
+      return cached.value;
+    }
+    const value = safeSource(kind, await load()), observedAt = now();
+    work.sourceObservedAt = observedAt;
+    work.sources ||= [];
+    work.sources.push({ kind: 'source', key, forestId: work.forestId, value, observedAt, createdAt: Date.parse(observedAt), expiresAt: Date.parse(observedAt) + 10000 });
+    return value;
+  }
+  // Targeted refreshes publish with compare-and-set on the forest generation.
+  // Ordinary collections publish without a generation check: they never conflict
+  // with each other, and a scope that is already newer in the shared store is
+  // simply skipped (see SharedStore.publish).
+  async function publish(job, options) {
+    const cas = targeted(job);
+    const ids = cas ? [...new Set([...(options.forests || []).map(f => f.id), ...(options.snapshots || []).map(s => s.forestId)])] : [];
+    const expected = Object.fromEntries(ids.map(id => [id, job.generations?.[id] || 0]));
+    const publicationId = crypto.randomUUID();
+    job.published ||= {};
+    for (const s of options.snapshots || []) job.published[snapshotKey(s)] = publicationId;
+    const result = await shared.publish({ ...options, expected, publicationId });
+    if (!result.accepted) throw new SourceError('SOURCE_CONFLICT', '다른 조회가 먼저 갱신한 범위를 다시 확인합니다.');
+    if (cas) job.generations = { ...job.generations, ...result.generations };
+    return result;
+  }
   async function savedCredentials() {
     const credentials = await store.getSecret('credentials');
     return typeof credentials?.id === 'string' && credentials.id.length && typeof credentials.password === 'string' && credentials.password.length ? credentials : null;
@@ -58,7 +99,14 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
   }
   async function saveSnapshot(job, task, snapshot) {
     await store.set(pendingKey(job, task), snapshot);
-    if (!targeted(job)) await store.set(snapshotKey(task), snapshot);
+    if (!targeted(job)) {
+      const forest = await forestForRead(task.forestId);
+      const result = await publish(job, { snapshots: [{ ...snapshot, regionId: forest.regionId }], sources: task.sources || [] });
+      task.sources = [];
+      // The shared store already holds a newer observation of this scope; stop
+      // spending source requests on it and leave the newer data in place.
+      if (result.skipped.includes(snapshotKey(task))) { task.status = 'complete'; task.superseded = true; delete job.published[snapshotKey(task)]; }
+    }
   }
   async function completeScope(job, task) {
     const snapshot = await store.get(pendingKey(job, task));
@@ -70,17 +118,17 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
     task.status = 'complete';
   }
   async function publishTargeted(job) {
-    const entries = [];
+    const snapshots = [];
     for (const task of job.tasks.filter(t => t.kind === 'scope')) {
       const snapshot = await store.get(pendingKey(job, task));
       if (snapshot?.status !== 'complete') throw new SourceError('INTERNAL', '완료된 조회 결과를 읽지 못했습니다. 다시 시도해주세요.');
-      entries.push([snapshotKey(task), snapshot]);
+      const forest = job.stagedForests?.[task.forestId] || await forestForRead(task.forestId);
+      snapshots.push({ ...snapshot, regionId: forest.regionId });
     }
-    for (const forest of Object.values(job.stagedForests || {})) entries.push([`forest:${forest.id}`, forest]);
-    entries.push(['job', job]);
-    // One SQL statement commits every month/type together on both SQLite and D1.
-    await store.db.prepare(`INSERT INTO kv(key,value) VALUES ${entries.map(() => '(?,?)').join(',')} ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
-      .bind(...entries.flatMap(([key, value]) => [store.key(key), JSON.stringify(value)])).run();
+    const result = await publish(job, { forests: Object.values(job.stagedForests || {}), snapshots,
+      sources: [...job.regions, ...job.tasks].flatMap(t => t.sources || []), invalidatePrices: job.onlyForestIds,
+      personal: [[store.key('job'), job]] });
+    job.publicationId = result.publicationId;
   }
   async function withLock(action) {
     const owner = crypto.randomUUID();
@@ -92,36 +140,44 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
     if (!auth?.connectedAt) throw new SourceError('AUTH_REQUIRED', '숲나들e를 먼저 연결해주세요.', 401);
     return { auth, source: sourceFactory(auth) };
   }
-  async function advance(job) {
+  async function advance(job, requestId, requestSignature) {
     const { auth, source } = await sourceSession();
     let work = job.regions.find(r => r.status === 'pending');
     try {
       job.error = null; job.waitUntil = null;
       if (work) {
-        const forests = await source.forests(work.region);
+        // Targeted refreshes capture generations BEFORE the upstream request,
+        // including newly discovered forests (absent means generation zero).
+        if (targeted(job) && !job.generations) job.generations = Object.fromEntries((await shared.statement("SELECT substr(scope_key,8) AS id,version FROM shared_versions WHERE scope_key >= 'forest:' AND scope_key < 'forest;' ").all()).results.map(r => [r.id, r.version]));
+        const forests = [...new Map((await sourceValue(job, work, 'forests', work.region, () => source.forests(work.region))).map(f => [f.id, f])).values()];
+        const published = [];
         for (const forest of forests) {
-          const old = await store.get(`forest:${forest.id}`);
+          const old = await forestForRead(forest.id);
           if (job.onlyForestIds?.includes(forest.id)) {
             job.stagedForests ||= {};
             job.stagedForests[forest.id] = { ...old, ...forest };
-          } else await store.set(`forest:${forest.id}`, { ...old, ...forest });
+          } else if (!targeted(job)) published.push({ ...old, ...forest });
           if (job.onlyForestIds && !job.onlyForestIds.includes(forest.id)) continue;
           if (!job.forestIds.includes(forest.id)) {
             job.forestIds.push(forest.id);
             job.tasks.push({ kind: 'policy', forestId: forest.id, name: forest.name, stage: 'policy', status: 'pending' });
           }
         }
+        if (!targeted(job)) {
+          await publish(job, { forests: published, sources: work.sources || [], knownRegion: work.region.id });
+          work.sources = [];
+        }
         work.status = 'complete';
       } else {
         work = job.tasks.find(t => t.status === 'pending');
         if (work?.kind === 'policy') {
-          const policy = await source.policy(work.forestId);
+          const policy = await sourceValue(job, work, 'policy', work.forestId, () => source.policy(work.forestId));
           const types = [...new Set(policy.types.map(t => Object.keys(typeCode).find(k => typeCode[k] === t.upperGoodsClsscCd)).filter(Boolean))];
-          const forest = job.stagedForests?.[work.forestId] || await store.get(`forest:${work.forestId}`);
+          const forest = job.stagedForests?.[work.forestId] || await forestForRead(work.forestId);
           if (targeted(job)) {
             job.stagedForests ||= {};
             job.stagedForests[forest.id] = { ...forest, types };
-          } else await store.set(`forest:${work.forestId}`, { ...forest, types });
+          } else { await publish(job, { forests: [{ ...forest, types }], sources: work.sources || [] }); work.sources = []; }
           const scopes = [];
           for (const month of collectionMonths(job)) {
             for (const type of types.filter(t => job.type === 'all' || t === job.type)) scopes.push({ kind: 'scope', forestId: forest.id, name: forest.name, month, type, lastDay: policy.lastDay, stage: 'queue', status: 'pending', cursor: 0 });
@@ -131,17 +187,19 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
         } else if (work) {
           const scope = { insttId: work.forestId, upperGoodsClsscCd: typeCode[work.type], srchDate: work.month, lastDay: work.lastDay, inqurSctin: '01' };
           if (work.stage === 'queue') {
-            const queue = await source.queue(auth.queue);
-            auth.queue = queue;
+            const goodsKey = await cacheKey({ kind: 'goods', input: scope });
+            const cachedGoods = !targeted(job) && !job.forceSource ? await shared.cached('source', goodsKey) : null;
+            const queue = cachedGoods ? { granted: true, cached: true } : await source.queue(auth.queue);
+            if (!queue.cached) auth.queue = queue;
             if (queue.granted) {
-              const goods = await source.goods(scope, queue);
+              const goods = cachedGoods ? cachedGoods.value : await sourceValue(job, work, 'goods', scope, () => source.goods(scope, queue));
               work.units = goods.rsrvtGoodsList.map(r => normalizeUnit(r, work.type));
               if (new Set(work.units.map(u => u.id)).size !== work.units.length) throw new SourceError('SOURCE_CHANGED', '시설 목록에 중복 항목이 있어 조회를 멈췄습니다.');
               work.holidays = (goods.hldtInfoList || []).map(h => ({ dt: String(h.dt), dtCd: h.dtCd }));
               work.stage = 'completeQueue';
               // Targeted updates stay private until every scope has completed.
-              await store.set(pendingKey(job, work), { forestId: work.forestId, month: work.month, type: work.type, jobId: job.id, units: work.units, days: {}, checkedUnits: 0, status: 'partial', observedAt: null });
-              await source.completeQueue(queue); auth.queue = null; work.stage = 'days';
+              await store.set(pendingKey(job, work), { forestId: work.forestId, month: work.month, type: work.type, jobId: job.id, units: work.units, days: {}, checkedUnits: 0, status: 'partial', observedAt: cachedGoods?.observedAt || work.sourceObservedAt });
+              if (!queue.cached) await source.completeQueue(queue); auth.queue = null; work.stage = 'days';
               if (!work.units.length) await completeScope(job, work);
             } else job.waitUntil = queue.waitUntil;
           } else if (work.stage === 'completeQueue') {
@@ -152,7 +210,7 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
             const ids = work.units.slice(work.cursor, work.cursor + 5).map(u => u.id);
             if (!ids.length) await completeScope(job, work);
             else {
-              const rows = await source.days(scope, ids);
+              const rows = await sourceValue(job, work, 'days', { ...scope, ids: [...ids].sort() }, () => source.days(scope, ids));
               const snapshot = await store.get(pendingKey(job, work));
               if (!snapshot) throw new SourceError('INTERNAL', '임시 조회 결과를 읽지 못했습니다. 이 범위를 다시 조회해주세요.');
               const requiredDates = monthDates(work.month);
@@ -174,7 +232,7 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
                 if (unit && limits.length) unit.maxNights = Math.min(...limits);
               }
               work.cursor += ids.length; snapshot.checkedUnits = work.cursor;
-              if (!snapshot.observedAt) snapshot.observedAt = now();
+              if (!snapshot.observedAt || work.sourceObservedAt < snapshot.observedAt) snapshot.observedAt = work.sourceObservedAt;
               snapshot.updatedAt = now();
               if (work.cursor === work.units.length) { work.status = 'complete'; snapshot.status = 'complete'; }
               await saveSnapshot(job, work, snapshot);
@@ -199,51 +257,98 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
       }
     } catch (error) {
       const safe = safeError(error); job.error = safe;
-      if (safe.code === 'AUTH_REQUIRED') { job.status = 'auth_required'; auth.connectedAt = null; auth.queue = null; }
+      if (safe.code === 'SOURCE_CONFLICT' && (job.conflictRetries || 0) < 3) {
+        job.conflictRetries = (job.conflictRetries || 0) + 1;
+        for (const row of job.tasks.filter(t => t.kind === 'scope')) await store.remove(pendingKey(job, row));
+        job.regions.forEach(r => { r.status = 'pending'; r.sources = []; });
+        job.tasks = []; job.forestIds = []; job.stagedForests = {}; job.generations = null;
+        job.published = {}; job.status = 'running'; job.finishedAt = null; job.forceSource = true; auth.queue = null;
+      } else if (safe.code === 'AUTH_REQUIRED') { job.status = 'auth_required'; auth.connectedAt = null; auth.queue = null; }
       else if (safe.code === 'ACCESS_LIMIT') { job.status = 'blocked'; }
       else { if (work) { work.status = 'failed'; work.error = safe; } }
     } finally {
       job.updatedAt = now();
       await store.setSecret('auth', { ...source.export(), ...(auth.connectedAt === null ? { connectedAt: null } : {}), queue: auth.queue || null });
+      rememberRequest(job, requestId, 'step', requestSignature);
       await store.set('job', job);
     }
     return publicJob(job);
   }
   async function availability(query, forestId) {
-    const catalog = await store.get('catalog');
     const prefixes = ['forest:', `snapshot:${query.month}:`, ...(query.nights > 1 ? [`snapshot:${nextMonth(query.month)}:`] : [])];
-    // Read the same committed generation even when a multi-month update finishes mid-request.
     const rows = (await store.db.prepare(`SELECT key,value FROM kv WHERE key = ? OR ${prefixes.map(() => '(key >= ? AND key < ?)').join(' OR ')} ORDER BY key`).bind(store.key('job'),...prefixes.flatMap(prefix=>store.prefixRange(prefix))).all()).results;
-    const forests = rows.filter(r => r.key.startsWith(store.key('forest:'))).map(r => JSON.parse(r.value)).filter(f => (query.region === 'all' || f.regionId === query.region) && (!forestId || f.id === forestId));
-    const snapshots = rows.filter(r => r.key.startsWith(store.key('snapshot:'))).map(r => JSON.parse(r.value));
+    const legacyForests = rows.filter(r => r.key.startsWith(store.key('forest:'))).map(r => JSON.parse(r.value)).filter(f => (query.region === 'all' || f.regionId === query.region) && (!forestId || f.id === forestId));
+    const legacySnapshots = rows.filter(r => r.key.startsWith(store.key('snapshot:'))).map(r => JSON.parse(r.value));
     const jobRow = rows.find(r => r.key === store.key('job')), job = jobRow ? JSON.parse(jobRow.value) : null;
-    const regionIds = query.region === 'all' ? catalog?.regions?.map(r => r.id) || [] : [query.region];
-    const knownRegions = await store.get('knownRegions') || [];
-    const missingRegions = regionIds.filter(r => !knownRegions.includes(r));
-    let complete = 0, pending = 0;
-    const results = forests.map(f => {
-      const neededTypes = f.types?.filter(t => query.type === 'all' || t === query.type);
-      const wanted = [query.month, ...(query.nights > 1 ? [nextMonth(query.month)] : [])].flatMap(month => (neededTypes || []).map(type => `${month}:${f.id}:${type}`));
-      const relevant = snapshots.filter(s => s.forestId === f.id && wanted.includes(`${s.month}:${s.forestId}:${s.type}`));
-      const isComplete = !!neededTypes && wanted.every(key => relevant.some(s => `${s.month}:${s.forestId}:${s.type}` === key && s.status === 'complete'));
-      isComplete ? complete++ : pending++;
-      const result = summarizeForest(f, relevant, query, !!forestId);
-      const activeTasks = job && collectionMonths(job).includes(query.month) ? job.tasks.filter(t => t.forestId === f.id && t.kind === 'scope' && wanted.includes(`${t.month}:${t.forestId}:${t.type}`)) : [];
-      const stale = relevant.some(s => (Date.now() - Date.parse(s.observedAt || 0) > 15 * 60 * 1000) || (activeTasks.length > 0 && s.jobId !== job.id));
-      return { ...result, coverage: isComplete ? 'complete' : 'partial', stale, failed: activeTasks.some(t => t.status === 'failed') };
-    });
-    return { query, forests: results, coverage: { discovered: forests.length, complete, pending, missingRegions: missingRegions.length, regionTotal: regionIds.length }, job: publicJob(job), queryVersion: job?.updatedAt || null, fetchedAt: now() };
+    const allowed = await canReadShared();
+    const months = [query.month, ...(query.nights > 1 ? [nextMonth(query.month)] : [])];
+    const wantedFor = f => months.flatMap(month => (f.types || []).filter(t => query.type === 'all' || t === query.type).map(type => snapshotKey({ month, forestId: f.id, type })));
+    // Retained personal rows only matter where the shared payload does not cover
+    // them; a cached shared result that covers every wanted legacy key is reused.
+    const covers = payload => legacyForests.every(f => payload.forests.some(p => p.id === f.id))
+      && legacySnapshots.every(s => { const f = payload.forests.find(p => p.id === s.forestId); return !f || !wantedFor(f).includes(snapshotKey(s)) || !!f.scopePublications?.[snapshotKey(s)]; });
+    const read = allowed ? await shared.read(query, forestId, { accept: legacyForests.length || legacySnapshots.length ? covers : null }) :
+      { catalog: await catalogForRead(), knownRegions: [], forests: [], snapshots: [], versions: [], dependencies: '', cacheHit: false, createdAt: Date.now() };
+    let payload = read.payload, fallbackKeys = [];
+    if (!payload) {
+      if (!read.catalog) { read.catalog = await store.get('catalog'); read.personalCatalog = !!read.catalog; }
+      const forestMap = new Map(read.forests.map(f => [f.id, f]));
+      const legacyIds = legacyForests.filter(f => !forestMap.has(f.id)).map(f => f.id);
+      for (const f of legacyForests) if (!forestMap.has(f.id)) forestMap.set(f.id, f);
+      const snapshots = new Map(read.snapshots.map(s => [snapshotKey(s), s])), fallback = new Set();
+      for (const s of legacySnapshots) if (forestMap.has(s.forestId) && (query.type === 'all' || s.type === query.type) && !snapshots.has(snapshotKey(s))) {
+        snapshots.set(snapshotKey(s), { ...s, publicationId: s.jobId }); fallback.add(snapshotKey(s));
+      }
+      const regionIds = [...new Set(query.region === 'all' ? read.catalog?.regions?.map(r => r.id) || [] : [query.region])];
+      const knownRegions = [...read.knownRegions, ...(legacyIds.length ? await store.get('knownRegions') || [] : [])];
+      const dataCoverage = { sharedScopes: read.snapshots.length, fallbackScopes: 0, missingScopes: 0, emptyScopes: 0, legacyForests: legacyIds.length };
+      let complete = 0, pending = 0;
+      const forests = [...forestMap.values()].map(f => {
+        const wanted = wantedFor(f);
+        const relevant = wanted.map(key => snapshots.get(key)).filter(Boolean);
+        // Only legacy scopes the result actually uses count as fallback.
+        for (const key of wanted) if (fallback.has(key) && snapshots.has(key)) fallbackKeys.push(key);
+        dataCoverage.missingScopes += wanted.length - relevant.length;
+        dataCoverage.emptyScopes += relevant.filter(s => s.status === 'complete' && !s.units.length).length;
+        const isComplete = !!f.types && wanted.every(key => snapshots.get(key)?.status === 'complete');
+        isComplete ? complete++ : pending++;
+        return { ...summarizeForest(f, relevant, query, !!forestId), coverage: isComplete ? 'complete' : 'partial',
+          scopePublications: Object.fromEntries(relevant.map(s => [snapshotKey(s), s.publicationId])) };
+      });
+      dataCoverage.fallbackScopes = fallbackKeys.length;
+      const coverage = { discovered: forests.length, complete, pending, missingRegions: regionIds.filter(r => !knownRegions.includes(r)).length, regionTotal: regionIds.length };
+      // connect-required: shared reading is withheld because this browser never
+      // connected; it is neither "not collected yet" nor a confirmed empty result.
+      dataCoverage.state = fallbackKeys.length || legacyIds.length ? 'personal-fallback' : !allowed ? 'connect-required' : !read.catalog || !regionIds.length ? 'unavailable' : coverage.missingRegions || dataCoverage.missingScopes || pending ? 'incomplete' : !forests.length || dataCoverage.emptyScopes === dataCoverage.sharedScopes ? 'empty' : 'shared';
+      const times = forests.map(f => f.observedAt).filter(Boolean).sort();
+      payload = { query, forests, coverage, dataCoverage, dataVersion: read.dependencies, sourceObservedAt: times[0] || null };
+      if (allowed && !fallbackKeys.length && !legacyIds.length && !read.personalCatalog) await shared.cache({ kind: 'search', key: read.key, dependencies: read.dependencies, value: payload, createdAt: read.createdAt, expiresAt: read.createdAt + 10000 }).catch(() => {});
+    }
+    const personal = { job: publicJob(job), fallbackKeys, forests: {} };
+    for (const f of payload.forests) {
+      // A superseded scope was refreshed by someone else while this job ran; the shared data is newer, not stale.
+      const active = job ? job.tasks.filter(t => t.kind === 'scope' && !t.superseded && t.forestId === f.id && collectionMonths(query).includes(t.month) && (query.type === 'all' || t.type === query.type)) : [];
+      personal.forests[f.id] = { failed: active.some(t => t.status === 'failed'), inProgress: active.some(t => t.status === 'pending'),
+        staleByJob: active.some(t => f.scopePublications[snapshotKey(t)] && f.scopePublications[snapshotKey(t)] !== (job.published?.[snapshotKey(t)] || job.id)) };
+    }
+    const fetchedAt = now();
+    return { ...payload, forests: payload.forests.map(f => ({ ...f, stale: !!f.observedAt && Date.now() - Date.parse(f.observedAt) > 900000,
+      priceVersion: read.versions.find(r => r.scope_key === `price:${f.id}`)?.version || 0 })), personal,
+      cacheHit: read.cacheHit, cacheAge: Date.now() - read.createdAt, servedAt: fetchedAt, fetchedAt };
   }
   return async function handle(request) {
     const url = new URL(request.url), path = url.pathname;
     try {
+      const requestId = request.headers.get('x-request-id');
+      if (requestId && !/^[A-Za-z0-9-]{16,64}$/.test(requestId)) invalid('요청 식별자를 확인해주세요.');
+      const requestSignature = requestId ? await cacheKey({ path, body: await request.clone().text() }) : null;
       if (request.headers.get('sec-fetch-site') === 'cross-site') return response({ error: { code: 'FORBIDDEN', message: '같은 페이지에서 다시 시도해주세요.' } }, 403);
       let csrf = await store.get('appCsrf');
       if (!csrf) { csrf = crypto.randomUUID(); await store.set('appCsrf', csrf); }
       if (request.method !== 'GET' && (request.headers.get('origin') !== url.origin || request.headers.get('x-csrf-token') !== csrf)) return response({ error: { code: 'FORBIDDEN', message: '페이지를 새로고침한 후 다시 시도해주세요.' } }, 403);
       if (path === '/api/session' && request.method === 'GET') {
         const auth = await store.getSecret('auth');
-        return response({ connected: !!auth?.connectedAt, connectedAt: auth?.connectedAt || null, ...accountInfo(await savedCredentials()), storageLocation, csrfToken: csrf, catalog: await store.get('catalog'), job: publicJob(await store.get('job')) });
+        return response({ connected: !!auth?.connectedAt, connectedAt: auth?.connectedAt || null, ...accountInfo(await savedCredentials()), storageLocation, csrfToken: csrf, catalog: await catalogForRead(), job: publicJob(await store.get('job')) });
       }
       if (path === '/api/session/connect' && request.method === 'POST') return await withLock(async () => {
         const { explicit, credentials } = await connectionInput(request);
@@ -253,31 +358,37 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
         const catalog = await source.login(credentials.id, credentials.password);
         const entries = [['auth', await store.sealSecret(source.export())], ['credentials', await store.sealSecret(credentials)], ['catalog', catalog]];
         // Store the validated account, session and catalog as one successful generation.
-        await store.db.prepare(`INSERT INTO kv(key,value) VALUES ${entries.map(() => '(?,?)').join(',')} ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
-          .bind(...entries.flatMap(([key, value]) => [store.key(key), JSON.stringify(value)])).run();
+        await store.db.batch([store.db.prepare(`INSERT INTO kv(key,value) VALUES ${entries.map(() => '(?,?)').join(',')} ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+          .bind(...entries.flatMap(([key, value]) => [store.key(key), JSON.stringify(value)])), ...shared.catalogStatements(catalog)]);
         return response({ connected: true, connectedAt: source.connectedAt, ...accountInfo(credentials), catalog });
       });
       if (path === '/api/session/disconnect' && request.method === 'POST') return await withLock(() => clearConnection());
       if (path === '/api/session/forget' && request.method === 'POST') return await withLock(() => clearConnection(true));
-      if (path === '/api/availability' && request.method === 'GET') return response(await availability(queryFrom(Object.fromEntries(url.searchParams), await store.get('catalog'))));
+      if (path === '/api/availability' && request.method === 'GET') return response(await availability(queryFrom(Object.fromEntries(url.searchParams), await catalogForRead())));
       const detail = path.match(/^\/api\/forests\/([A-Za-z0-9_-]+)$/);
-      if (detail && request.method === 'GET') return response(await availability(queryFrom(Object.fromEntries(url.searchParams), await store.get('catalog')), detail[1]));
+      if (detail && request.method === 'GET') return response(await availability(queryFrom(Object.fromEntries(url.searchParams), await catalogForRead()), detail[1]));
       const price = path.match(/^\/api\/forests\/([A-Za-z0-9_-]+)\/price$/);
       if (price && request.method === 'POST') {
         const input = await request.json();
         const query = { forestId: price[1], unitId: input.unitId, type: input.type, date: input.date, nights: input.nights };
         if (typeof query.unitId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(query.unitId) || !['stay', 'camp'].includes(query.type) || typeof query.date !== 'string' || !/^20\d{2}(0[1-9]|1[0-2])\d{2}$/.test(query.date) || ![1, 2, 3].includes(query.nights) || !monthDates(query.date.slice(0, 6)).includes(query.date) || query.date < kstToday()) invalid('요금을 확인할 시설과 날짜를 다시 선택해주세요.');
-        const snapshot = await store.get(`snapshot:${query.date.slice(0, 6)}:${query.forestId}:${query.type}`);
+        const sharedSnapshot = await canReadShared() ? await shared.snapshot(`snapshot:${query.date.slice(0, 6)}:${query.forestId}:${query.type}`) : null;
+        const snapshot = sharedSnapshot || await store.get(`snapshot:${query.date.slice(0, 6)}:${query.forestId}:${query.type}`);
         if (!snapshot?.units.some(u => u.id === query.unitId)) invalid('조회된 시설을 선택해주세요.');
         const key = `price:${query.forestId}:${query.type}:${query.unitId}:${query.date}:${query.nights}`;
-        const cached = await store.get(key);
-        if (cached && Date.now() - Date.parse(cached.observedAt) < 15 * 60 * 1000) return response({ quote: cached });
+        const version = await shared.priceVersion(query.forestId);
+        const cached = sharedSnapshot ? await shared.cached('price', key, String(version)) : null;
+        if (cached) return response({ quote: cached.value, priceVersion: version });
+        const legacyQuote = !sharedSnapshot ? await store.get(key) : null;
+        if (legacyQuote && (legacyQuote.priceVersion || 0) === version && Date.now() - Date.parse(legacyQuote.observedAt) < 900000) return response({ quote: legacyQuote, priceVersion: version });
         return await withLock(async () => {
           const { source, auth } = await sourceSession();
           try {
-            const quote = await source.price(query);
-            await store.set(key, quote);
-            return response({ quote });
+            const quote = safeSource('price', await source.price(query));
+            if (await shared.priceVersion(query.forestId) !== version) throw new SourceError('BUSY', '현황이 갱신됐어요. 새 요금을 다시 확인합니다.', 409);
+            if (sharedSnapshot) await shared.cache({ kind: 'price', key, forestId: query.forestId, dependencies: String(version), value: quote, observedAt: quote.observedAt, createdAt: Date.now(), expiresAt: Date.parse(quote.observedAt) + 900000 }).catch(() => {});
+            else await store.set(key, { ...quote, priceVersion: version });
+            return response({ quote, priceVersion: version });
           } finally { await store.setSecret('auth', { ...source.export(), queue: auth.queue || null }); }
         });
       }
@@ -293,10 +404,11 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
         const query = queryFrom(all ? { month: listedMonths[0], region: 'all', type: 'all', nights: 3 } : input, catalog);
         if (!catalog.months.some(m => m.id === query.month)) invalid('원천에서 제공하는 월을 선택해주세요.');
         const existing = await store.get('job');
+        if (isReplay(existing, requestId, 'sync', requestSignature)) return response({ job: publicJob(existing) }, 202);
         if (existing?.status === 'running') return response({ job: publicJob(existing) }, 202);
         let onlyForestIds = null;
         if (input.forestId) {
-          const forest = await store.get(`forest:${input.forestId}`);
+          const forest = await forestForRead(input.forestId);
           if (!forest) invalid('먼저 지역의 휴양림 목록을 조회해주세요.');
           onlyForestIds = [forest.id]; query.region = forest.regionId;
         }
@@ -304,17 +416,19 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
         const selectedMonths = listedMonths || [query.month];
         const months = [...new Set(selectedMonths.flatMap(month => [month, ...(query.nights > 1 ? [nextMonth(month)] : [])]))].sort();
         const regions = [...new Map(catalog.regions.filter(r => query.region === 'all' || r.id === query.region).map(region => [region.id, region])).values()];
-        const job = { id: crypto.randomUUID(), ...query, scope: all ? 'all' : 'selection', listedMonths: selectedMonths, months, onlyForestIds, status: 'running', startedAt: now(), updatedAt: now(), regions: regions.map(region => ({ region, status: 'pending' })), tasks: [], forestIds: [] };
+        const job = { id: crypto.randomUUID(), ...query, scope: all ? 'all' : 'selection', listedMonths: selectedMonths, months, onlyForestIds, generations: onlyForestIds ? await shared.generations(onlyForestIds) : null, status: 'running', startedAt: now(), updatedAt: now(), regions: regions.map(region => ({ region, status: 'pending' })), tasks: [], forestIds: [] };
+        rememberRequest(job, requestId, 'sync', requestSignature);
         await store.set('job', job); return response({ job: publicJob(job) }, 202);
       });
       const jobAction = path.match(/^\/api\/job\/(step|pause|resume|retry|cancel)$/);
       if (jobAction && request.method === 'POST') return await withLock(async () => {
         const job = await store.get('job'); if (!job) invalid('진행 중인 조회가 없습니다.');
         const action = jobAction[1];
+        if (isReplay(job, requestId, action, requestSignature)) return response({ job: publicJob(job) });
         if (action === 'step') {
           if (job.status !== 'running') return response({ job: publicJob(job) });
           if (job.waitUntil && job.waitUntil > Date.now()) return response({ job: publicJob(job) });
-          const result = await advance(job);
+          const result = await advance(job, requestId, requestSignature);
           const known = new Set(await store.get('knownRegions') || []);
           job.regions.filter(r => r.status === 'complete').forEach(r => known.add(r.region.id)); await store.set('knownRegions', [...known]);
           return response({ job: result });
@@ -329,8 +443,11 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
           const auth = await store.getSecret('auth');
           if (auth.queue?.granted) auth.queue = null;
           await store.setSecret('auth', auth);
-          job.status = 'running'; job.error = null; job.waitUntil = null;
+          // A manual resume or retry gets a fresh conflict budget; the generation
+          // baseline is kept so a retained scope still cannot overwrite a newer refresh.
+          job.status = 'running'; job.error = null; job.waitUntil = null; job.conflictRetries = 0;
         }
+        rememberRequest(job, requestId, action, requestSignature);
         job.updatedAt = now(); await store.set('job', job); return response({ job: publicJob(job) });
       });
       return response({ error: { code: 'NOT_FOUND', message: '요청한 기능을 찾을 수 없습니다.' } }, 404);

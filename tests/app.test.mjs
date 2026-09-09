@@ -1,3 +1,4 @@
+import { SharedStore } from '../server/shared.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import{Store}from'../server/store.mjs';import{sqlite}from'../server/sqlite.mjs';import{createApp}from'../server/app.mjs';import{SourceError}from'../server/foresttrip.mjs';import{monthDates,kstToday,addDays,nextMonth}from'../server/domain.mjs';
 class FixtureSource{
@@ -13,10 +14,11 @@ class FixtureSource{
  async price(query){FixtureSource.priceCalls.push(query);if(FixtureSource.failPrice)throw new SourceError('PRICE_UNAVAILABLE','요금 확인 불가');return{...query,baseTotal:120000*query.nights,observedAt:new Date().toISOString()};}
  async days(scope,ids){FixtureSource.calls.push(ids.length);if(FixtureSource.failCamp&&scope.upperGoodsClsscCd==='02')throw new SourceError('NETWORK','fixture failure');return ids.flatMap(goodsId=>monthDates(scope.srchDate).map(useDt=>({goodsId,useDt,rsrvtAvail:'Y',rsrvtCnt:0})));}
 }
-async function setup(t,Source=FixtureSource,{connect=true,env}={}){FixtureSource.failCamp=false;FixtureSource.calls=[];FixtureSource.priceCalls=[];FixtureSource.failPrice=false;const db=sqlite(':memory:');t.after(()=>db.close());const store=new Store(db,'a'.repeat(64));await store.init();let handle=createApp({store,env,sourceFactory:a=>new Source(a)});let token;
+async function setup(t,Source=FixtureSource,{connect=true,env}={}){FixtureSource.failCamp=false;FixtureSource.calls=[];FixtureSource.priceCalls=[];FixtureSource.failPrice=false;const db=sqlite(':memory:');t.after(()=>db.close());const store=new Store(db,'a'.repeat(64));await store.init();await new SharedStore(db).init();let handle=createApp({store,env,sourceFactory:a=>new Source(a)});let token;
  const call=async(path,body,headers={})=>{const result=await handle(new Request('http://localhost:5178'+path,{method:body===undefined?'GET':'POST',headers:{Origin:'http://localhost:5178','Content-Type':'application/json',...(token?{'X-CSRF-TOKEN':token}:{}),...headers},...(body===undefined?{}:{body:JSON.stringify(body)})}));return{status:result.status,data:await result.json()};};
  token=(await call('/api/session')).data.csrfToken;if(connect)assert.equal((await call('/api/session/connect',{id:'private-id',password:'private-password'})).status,200);return{store,call,reload:()=>{handle=createApp({store,env,sourceFactory:a=>new Source(a)});}};
 }
+async function readSnapshots(store,month){const rows=(await store.db.prepare('SELECT data,publication_id AS publicationId,generation FROM shared_snapshots WHERE (? IS NULL OR month=?) ORDER BY scope_key').bind(month||null,month||null).all()).results;return rows.map(({data,...meta})=>({...JSON.parse(data),...meta}));}
 async function finish(call){for(let i=0;i<60;i++){const r=await call('/api/job/step',{});assert.equal(r.status,200);if(r.data.job.status!=='running')return r.data.job;}throw new Error('job did not finish');}
 test('encrypted session persists and never appears in public API',async t=>{const{store,call}=await setup(t);const raw=await store.get('auth');assert.ok(raw.ciphertext);assert.ok(!JSON.stringify(raw).includes('private-cookie'));assert.equal((await store.getSecret('auth')).cookies.fixture,'private-cookie');const r=await call('/api/session');assert.ok(!JSON.stringify(r).includes('private-cookie'));assert.ok(!JSON.stringify(r).includes('private-password'));});
 test('first connection requires credentials and stores successful credentials only as ciphertext',async t=>{
@@ -80,13 +82,13 @@ test('disconnect retains the encrypted account for reconnect after application r
 });
 test('forget requires same-origin CSRF, removes account and session, pauses work and keeps cached results',async t=>{
  const{store,call}=await setup(t),month=kstToday().slice(0,6);
- await call('/api/sync',{month,type:'stay'});await finish(call);const snapshots=await store.list('snapshot:'),catalog=await store.get('catalog');
+ await call('/api/sync',{month,type:'stay'});await finish(call);const snapshots=await readSnapshots(store),catalog=await store.get('catalog');
  await call('/api/sync',{month,type:'stay'});
  assert.equal((await call('/api/session/forget',{}, {Origin:'https://other.test'})).status,403);
  assert.equal((await call('/api/session/forget',{}, {'X-CSRF-TOKEN':'wrong'})).status,403);assert.ok(await store.get('credentials'));
  const forgotten=await call('/api/session/forget',{});assert.equal(forgotten.status,200);assert.deepEqual(forgotten.data,{connected:false,connectedAt:null,configured:false,accountLabel:null});
  assert.equal(await store.get('credentials'),null);assert.equal(await store.get('auth'),null);assert.equal((await store.get('job')).status,'paused');
- assert.deepEqual(await store.list('snapshot:'),snapshots);assert.deepEqual(await store.get('catalog'),catalog);
+ assert.deepEqual(await readSnapshots(store),snapshots);assert.deepEqual(await store.get('catalog'),catalog);
  assert.equal((await call('/api/availability?month='+month+'&type=stay')).data.forests.length,1);
  assert.equal((await call('/api/session/connect',{})).data.error.code,'CREDENTIALS_REQUIRED');
  assert.equal((await call('/api/session/forget',{})).status,200);
@@ -108,16 +110,16 @@ test('prices are scoped to known facilities, cached by date and nights, and pres
  assert.equal((await call(path,{...body,date:addDays(date,1)})).status,200);assert.equal(FixtureSource.priceCalls.length,3);
  for(const patch of [{unitId:'unknown'},{type:'all'},{date:'20269912'},{date:'20260230'},{nights:4},{date:addDays(date,-1)}])assert.equal((await call(path,{...body,...patch})).status,400);
  assert.equal((await call('/api/forests/other/price',body)).status,400);
- const key=`price:0101:stay:g0:${date}:1`,cached=await store.get(key);cached.observedAt=new Date(Date.now()-16*60*1000).toISOString();await store.set(key,cached);FixtureSource.failPrice=true;
+ const key=`price:0101:stay:g0:${date}:1`;await store.db.prepare("UPDATE shared_cache SET expires_at=0 WHERE kind='price' AND cache_key=?").bind(key).run();FixtureSource.failPrice=true;
  assert.equal((await call(path,body)).status,502);assert.equal((await call('/api/availability?month='+month)).status,200);
  assert.equal((await call(path,body,{Origin:'https://other.test'})).status,403);
 });
 test('includeWait query changes stored result counts and detail states without a new source collection',async t=>{
  const {call,store}=await setup(t),date=kstToday(),month=date.slice(0,6);
  await call('/api/sync',{month,type:'stay'});await finish(call);
- const key=`snapshot:${month}:0101:stay`,snapshot=await store.get(key);
+ const key=`snapshot:${month}:0101:stay`,shared=new SharedStore(store.db),snapshot=await shared.snapshot(key);
  for(const unit of snapshot.units)snapshot.days[unit.id][date]={state:'full'};
- snapshot.days.g0[date]={state:'wait'};snapshot.days.g1[date]={state:'available'};await store.set(key,snapshot);
+ snapshot.days.g0[date]={state:'wait'};snapshot.days.g1[date]={state:'available'};await shared.publish({snapshots:[{...snapshot,regionId:'1'}],expected:await shared.generations(['0101'])});
  const sourceCalls=FixtureSource.calls.length,path=`/api/forests/0101?month=${month}&type=stay&nights=1`;
  const before=(await call(path)).data.forests[0];assert.equal(before.dates[date].length,1);
  const after=(await call(path+'&includeWait=true')).data;assert.equal(after.query.includeWait,true);assert.equal(after.forests[0].dates[date].length,2);assert.deepEqual(after.forests[0].dateCounts[date],{available:1,wait:1});
@@ -159,14 +161,15 @@ test('all options failures in later months remain visible and retry only failed 
   async login(){const catalog=await super.login();return{...catalog,months:[...catalog.months,{id:second,name:'다음 달'}]};}
   async days(scope,ids){queried.push(`${scope.srchDate}:${scope.upperGoodsClsscCd}`);if(fail&&scope.srchDate===second&&scope.upperGoodsClsscCd==='02')throw new SourceError('NETWORK','later month failure');return super.days(scope,ids);}
  }
- const {call,reload}=await setup(t,MultiMonthSource);
+ const {call,reload,store}=await setup(t,MultiMonthSource);
  await call('/api/sync',{month:second,type:'camp'});await finish(call);fail=true;
+ await store.db.prepare("UPDATE shared_cache SET expires_at=0 WHERE kind='source'").run();
  await call('/api/sync',{scope:'all'});const partial=await finish(call);
  assert.equal(partial.status,'partial');assert.equal(partial.failures.length,1);assert.equal(partial.failures[0].month,second);
- const cached=(await call(`/api/availability?month=${second}&type=camp`)).data.forests[0];assert.equal(cached.failed,true);assert.equal(cached.stale,true);assert.ok(Object.keys(cached.dates).length);
+ const response=(await call(`/api/availability?month=${second}&type=camp`)).data,cached=response.forests[0];assert.equal(response.personal.forests[cached.id].failed,true);assert.equal(response.personal.forests[cached.id].staleByJob,true);assert.ok(Object.keys(cached.dates).length);
  const before=queried.length;fail=false;reload();await call('/api/job/retry',{});const done=await finish(call);
  assert.equal(done.status,'complete');assert.equal(done.completedForests,1);assert.deepEqual(queried.slice(before),[`${second}:02`]);
- const after=(await call(`/api/availability?month=${second}&type=camp`)).data.forests[0];assert.equal(after.failed,false);assert.equal(after.stale,false);
+ const responseAfter=(await call(`/api/availability?month=${second}&type=camp`)).data,after=responseAfter.forests[0];assert.equal(responseAfter.personal.forests[after.id].failed,false);assert.equal(responseAfter.personal.forests[after.id].staleByJob,false);
 });
 
 test('targeted refresh keeps published results through batches and resume, then publishes every month and type together',async t=>{
@@ -177,26 +180,26 @@ test('targeted refresh keeps published results through batches and resume, then 
  }
  const {call,store,reload}=await setup(t,ChangedSource),path=`/api/availability?month=${month}&type=all&nights=2`;
  await call('/api/sync',{month,type:'all',nights:2});await finish(call);
- const before=(await call(path)).data.forests[0],oldSnapshots=await store.list('snapshot:');
+ const before=(await call(path)).data.forests[0],oldSnapshots=await readSnapshots(store);
  updated=true;const started=(await call('/api/sync',{month,type:'all',nights:2,forestId:'0101'})).data.job;
  assert.deepEqual(started.onlyForestIds,['0101']);
  for(let i=0;i<4;i++)await call('/api/job/step',{});
  let current=(await call(path)).data.forests[0];
  assert.deepEqual(current.dates,before.dates);assert.equal(current.name,before.name);assert.equal(current.coverage,'complete');
- assert.deepEqual(await store.list('snapshot:'),oldSnapshots);
+ assert.deepEqual(await readSnapshots(store),oldSnapshots);
  await call('/api/job/pause',{});reload();assert.equal((await call('/api/job')).data.job.status,'paused');
  assert.deepEqual((await call(path)).data.forests[0].dates,before.dates);
  await call('/api/job/resume',{});
  for(let i=0;i<30;i++){
   const job=(await call('/api/job/step',{})).data.job;
   current=(await call(path)).data.forests[0];
-  const generations=new Set((await store.list('snapshot:')).map(s=>s.jobId));
-  assert.equal(generations.size,1,'a reader never sees partially replaced month/type scopes');
+  const snapshots=await readSnapshots(store);
+  const generations=new Set(snapshots.map(s=>s.publicationId));
   if(job.status==='complete'){
    assert.equal(current.name,'새 휴양림 이름');assert.deepEqual(current.dates,{});assert.equal(current.coverage,'complete');
-   assert.deepEqual([...generations],[started.id]);assert.deepEqual(await store.list(`pending:${started.id}:`),[]);return;
+   assert.equal(generations.size,1,'all months and types publish together');assert.deepEqual(await store.list(`pending:${started.id}:`),[]);return;
   }
-  assert.deepEqual(current.dates,before.dates);assert.equal(current.name,before.name);
+  assert.deepEqual(snapshots,oldSnapshots);assert.deepEqual(current.dates,before.dates);assert.equal(current.name,before.name);
  }
  assert.fail('targeted update did not complete');
 });
@@ -206,18 +209,18 @@ test('targeted failed scope keeps every published scope and retained successes a
  class ChangedSource extends FixtureSource{async days(scope,ids){return(await super.days(scope,ids)).map(r=>({...r,rsrvtCnt:updated?1:0}));}}
  const {call,store,reload}=await setup(t,ChangedSource),path=`/api/availability?month=${month}&type=all`;
  await call('/api/sync',{month,type:'all'});await finish(call);
- const before=(await call(path)).data.forests[0],oldSnapshots=await store.list('snapshot:');
+ const before=(await call(path)).data.forests[0],oldSnapshots=await readSnapshots(store);
  updated=true;FixtureSource.failCamp=true;
  const started=(await call('/api/sync',{month,type:'all',forestId:'0101'})).data.job,partial=await finish(call);
  assert.equal(partial.status,'partial');assert.equal(partial.completedScopes,1);
- assert.deepEqual(await store.list('snapshot:'),oldSnapshots);
+ assert.deepEqual(await readSnapshots(store),oldSnapshots);
  assert.equal((await store.list(`pending:${started.id}:`)).length,2);
- const cached=(await call(path)).data.forests[0];assert.deepEqual(cached.dates,before.dates);assert.equal(cached.coverage,'complete');assert.equal(cached.failed,true);
+ const response=(await call(path)).data,cached=response.forests[0];assert.deepEqual(cached.dates,before.dates);assert.equal(cached.coverage,'complete');assert.equal(response.personal.forests['0101'].failed,true);
  const checked=FixtureSource.calls.length;FixtureSource.failCamp=false;reload();
  await call('/api/job/retry',{});assert.equal((await finish(call)).status,'complete');
  assert.equal(FixtureSource.calls.length,checked+1,'successful stay batches are reused');
  assert.deepEqual((await call(path)).data.forests[0].dates,{});
- assert.ok((await store.list('snapshot:')).every(s=>s.jobId===started.id));
+ assert.equal(new Set((await readSnapshots(store)).map(s=>s.publicationId)).size,1);
  assert.deepEqual(await store.list(`pending:${started.id}:`),[]);
 });
 
@@ -234,10 +237,10 @@ test('targeted refresh stages empty and previously unknown scopes until the whol
  const started=(await call('/api/sync',{month,type:'all',forestId:'0101'})).data.job;
  const partial=await finish(call);assert.equal(partial.status,'partial');assert.equal(partial.completedScopes,1);
  assert.deepEqual((await call(path)).data.forests[0].dates,before.dates);
- assert.equal(await store.get(`snapshot:${month}:0101:camp`),null,'new camp data stays private while the empty stay scope has failed');
+ assert.equal(await new SharedStore(store.db).snapshot(`snapshot:${month}:0101:camp`),null,'new camp data stays private while the empty stay scope has failed');
  await call('/api/job/retry',{});assert.equal((await finish(call)).status,'complete');
- const snapshots=await store.list(`snapshot:${month}:`);
- assert.equal(snapshots.length,2);assert.ok(snapshots.every(s=>s.jobId===started.id&&s.status==='complete'));
+ const snapshots=await readSnapshots(store,month);
+ assert.equal(snapshots.length,2);assert.equal(new Set(snapshots.map(s=>s.publicationId)).size,1);assert.ok(snapshots.every(s=>s.status==='complete'));
  assert.deepEqual(snapshots.find(s=>s.type==='stay').units,[]);
  assert.equal((await call(path)).data.forests[0].unitCount,1);
 });
@@ -246,13 +249,13 @@ test('selection-wide collection still publishes successful batches before comple
  const {call,store}=await setup(t),month=kstToday().slice(0,6);
  await call('/api/sync',{month,type:'all'});
  for(let i=0;i<4;i++)await call('/api/job/step',{});
- const snapshot=await store.get(`snapshot:${month}:0101:stay`);
+ const snapshot=await new SharedStore(store.db).snapshot(`snapshot:${month}:0101:stay`);
  assert.equal(snapshot.status,'partial');assert.equal(snapshot.checkedUnits,5);
  const data=(await call(`/api/availability?month=${month}`)).data;
- assert.equal(data.job.status,'running');assert.ok(Object.keys(data.forests[0].dates).length);
+ assert.equal(data.personal.job.status,'running');assert.ok(Object.keys(data.forests[0].dates).length);
 });
 
-test('public visitors isolate credentials, CSRF, jobs, results and account deletion',async t=>{
+test('public visitors share results but isolate credentials, CSRF, jobs and account deletion',async t=>{
  const {createWorker}=await import('../server/worker.mjs');
  const db=sqlite(':memory:');t.after(()=>db.close());
  const prepare=db.prepare.bind(db);
@@ -260,6 +263,7 @@ test('public visitors isolate credentials, CSRF, jobs, results and account delet
   if (/\bLIKE\b/i.test(sql)) assert.ok(args.every(value=>typeof value!=='string'||Buffer.byteLength(value)<=50),'D1 limits LIKE patterns to 50 bytes');
   return prepare(sql).bind(...args);
  }});
+ await new SharedStore(db).init();
  const env={DB:db,SESSION_SECRET:'public-test-secret-'.repeat(4),ASSETS:{fetch:async()=>new Response('public')}};
  const worker=createWorker(options=>createApp({...options,sourceFactory:auth=>new FixtureSource(auth)}));
  async function visitor(){
@@ -274,14 +278,111 @@ test('public visitors isolate credentials, CSRF, jobs, results and account delet
  assert.equal((await a.call('/api/session/connect',{}, {'X-CSRF-TOKEN':b.getCsrf()})).status,403);
  const month=kstToday().slice(0,6);await a.call('/api/sync',{month,type:'stay'});assert.equal((await finish(a.call)).status,'complete');
  assert.equal((await a.call('/api/availability?month='+month)).data.forests.length,1);
- assert.equal((await b.call('/api/availability?month='+month)).data.forests.length,0);assert.equal((await b.call('/api/session')).data.job,null);
+ const bRead=(await b.call('/api/availability?month='+month)).data;
+ assert.equal(bRead.forests.length,1);assert.equal(bRead.cacheHit,true);assert.equal(bRead.personal.job,null);assert.equal((await b.call('/api/session')).data.job,null);
+ const firstVisit=await visitor(),unconnected=await firstVisit.call('/api/availability?month='+month+'&region=1');
+ assert.equal(unconnected.status,200);assert.equal(unconnected.data.forests.length,0);assert.equal(unconnected.data.coverage.regionTotal,1);
+ const cacheRows=(await db.prepare("SELECT data FROM shared_cache WHERE kind='search'").bind().all()).results;
+ for(const row of cacheRows){const payload=JSON.parse(row.data);assert.equal(payload.personal,undefined);assert.equal(payload.job,undefined);assert.equal(payload.forests[0].failed,undefined);assert.ok(!row.data.includes('private-cookie'));assert.ok(!row.data.includes('jobId'));}
  const aId=a.getCookie().split('=')[1].split('.')[0],bId=b.getCookie().split('=')[1].split('.')[0];
- assert.equal((await new Store(db,env.SESSION_SECRET,aId).list('forest:')).length,1);
+ assert.equal((await new Store(db,env.SESSION_SECRET,aId).list('forest:')).length,0);assert.ok(await new SharedStore(db).forest('0101'));
  assert.deepEqual(await new Store(db,env.SESSION_SECRET,bId).list('forest:'),[]);
  await a.call('/api/sync',{month,type:'stay',forestId:'0101'});assert.equal((await finish(a.call)).status,'complete');
- assert.equal((await a.call('/api/availability?month='+month)).data.forests.length,1);assert.equal((await b.call('/api/availability?month='+month)).data.forests.length,0);
+ assert.equal((await a.call('/api/availability?month='+month)).data.forests.length,1);assert.equal((await b.call('/api/availability?month='+month)).data.forests.length,1);
  await a.call('/api/session/forget',{});assert.equal((await a.call('/api/session')).data.configured,false);assert.equal((await b.call('/api/session')).data.configured,true);assert.equal((await b.call('/api/session/connect',{})).status,200);
  const raw=await db.prepare('SELECT value FROM kv WHERE key LIKE ?').bind('%:credentials').all();assert.equal(raw.results.length,1);assert.ok(!raw.results[0].value.includes('b-secret'));
  const forged=a.getCookie().replace(/.$/,'z');assert.equal((await a.call('/api/availability',{},{Cookie:forged})).status,401);
  assert.equal((await a.call('/api/session',undefined,{'sec-fetch-site':'cross-site'})).status,403);
+});
+
+test('search results expire without another source request and batches invalidate them immediately',async t=>{
+ const {call,store}=await setup(t),month=kstToday().slice(0,6),path=`/api/availability?month=${month}&type=stay`;
+ await call('/api/sync',{month,type:'stay'});
+ for(let i=0;i<4;i++)await call('/api/job/step',{});
+ const first=(await call(path)).data;
+ assert.equal(first.personal.job.status,'running');assert.equal(first.forests[0].unitCount,6);
+ assert.equal((await call(path+'&guests=02')).data.cacheHit,true);
+ await call('/api/job/step',{});
+ const changed=(await call(path)).data;
+ assert.equal(changed.cacheHit,false);assert.notEqual(changed.dataVersion,first.dataVersion);
+ assert.equal(changed.forests[0].coverage,'complete');
+ const calls=FixtureSource.calls.length;
+ await store.db.prepare("UPDATE shared_cache SET expires_at=0 WHERE kind='search'").run();
+ const expired=(await call(path)).data;
+ assert.equal(expired.cacheHit,false);assert.equal(expired.sourceObservedAt,changed.sourceObservedAt);assert.equal(FixtureSource.calls.length,calls);
+});
+
+test('ordinary source cache reuse preserves observed time; targeted refresh bypasses source and price caches',async t=>{
+ const {call,store}=await setup(t),month=kstToday().slice(0,6),path=`/api/availability?month=${month}&type=stay`;
+ await call('/api/sync',{month,type:'stay'});await finish(call);
+ const before=(await call(path)).data,calls=FixtureSource.calls.length;
+ const pricePath='/api/forests/0101/price',body={unitId:'g0',type:'stay',date:kstToday(),nights:1};
+ await call(pricePath,body);assert.equal(FixtureSource.priceCalls.length,1);
+ await call('/api/sync',{month,type:'stay'});await finish(call);
+ assert.equal(FixtureSource.calls.length,calls);assert.equal((await call(path)).data.sourceObservedAt,before.sourceObservedAt);
+ await call('/api/sync',{month,type:'stay',forestId:'0101'});await finish(call);
+ assert.ok(FixtureSource.calls.length>calls);
+ assert.equal((await call(path)).data.forests[0].priceVersion,1);
+ await call(pricePath,body);assert.equal(FixtureSource.priceCalls.length,2);
+ assert.ok((await readSnapshots(store)).every(s=>s.jobId===undefined));
+});
+
+test('fallback fills only missing snapshot keys and never overwrites a successful empty shared scope',async t=>{
+ const {call,store}=await setup(t),shared=new SharedStore(store.db),month=kstToday().slice(0,6);
+ const forest={id:'legacy',regionId:'1',region:'경기',name:'이전 숲',types:['stay','camp']};
+ const old=type=>({forestId:forest.id,month,type,status:'complete',units:[{id:'old',name:'이전 시설',type,capacity:4,maxNights:3}],days:{old:{[kstToday()]:{state:'available'}}},observedAt:new Date(Date.now()-3600000).toISOString()});
+ await store.set('forest:legacy',forest);await store.set(`snapshot:${month}:legacy:stay`,old('stay'));await store.set(`snapshot:${month}:legacy:camp`,old('camp'));
+ const empty={...old('stay'),regionId:'1',units:[],days:{}};
+ await shared.publish({forests:[forest],snapshots:[empty],expected:{legacy:0},knownRegion:'1'});
+ const path=`/api/availability?month=${month}&type=all`;
+ const result=(await call(path)).data;
+ assert.equal(result.dataCoverage.state,'personal-fallback');assert.equal(result.dataCoverage.fallbackScopes,1);assert.equal(result.dataCoverage.emptyScopes,1);
+ assert.equal(result.forests[0].unitCount,1);assert.deepEqual(result.personal.fallbackKeys,[`snapshot:${month}:legacy:camp`]);
+ assert.equal((await store.db.prepare("SELECT COUNT(*) AS n FROM shared_cache WHERE kind='search'").first()).n,0);
+ const sharedEmpty=(await call(`/api/availability?month=${month}&type=stay`)).data;
+ assert.equal(sharedEmpty.dataCoverage.state,'empty');assert.equal(sharedEmpty.dataCoverage.fallbackScopes,0);assert.equal(sharedEmpty.forests[0].unitCount,0);
+ assert.equal((await store.get(`snapshot:${month}:legacy:stay`)).units.length,1);
+});
+
+test('same request ID advances one step once, while a new ID advances the next step',async t=>{
+ const {call}=await setup(t),month=kstToday().slice(0,6),startId=crypto.randomUUID(),stepId=crypto.randomUUID();
+ const started=await call('/api/sync',{month,type:'stay'},{'X-Request-ID':startId});
+ assert.equal((await call('/api/sync',{month,type:'stay'},{'X-Request-ID':startId})).data.job.id,started.data.job.id);
+ assert.equal((await call('/api/sync',{month,type:'camp'},{'X-Request-ID':startId})).status,400);
+ const first=await call('/api/job/step',{}, {'X-Request-ID':stepId});
+ assert.deepEqual((await call('/api/job/step',{}, {'X-Request-ID':stepId})).data.job,first.data.job);
+ assert.notDeepEqual((await call('/api/job/step',{}, {'X-Request-ID':crypto.randomUUID()})).data.job,first.data.job);
+});
+
+test('a never-connected browser is told to connect rather than shown missing data as a confirmed empty result',async t=>{
+ const {call}=await setup(t,FixtureSource,{connect:false});
+ const response=(await call('/api/availability')).data;
+ assert.equal(response.dataCoverage.state,'connect-required');assert.deepEqual(response.forests,[]);
+});
+
+test('legacy-only data retains its catalog coverage before the first shared connection',async t=>{
+ const {call,store}=await setup(t,FixtureSource,{connect:false}),month=kstToday().slice(0,6);
+ await store.set('catalog',{months:[{id:month,name:'이번 달'}],regions:[{id:'1',name:'경기'}]});
+ await store.set('knownRegions',['1']);
+ await store.set('forest:old',{id:'old',regionId:'1',name:'이전 숲',types:['stay']});
+ await store.set(`snapshot:${month}:old:stay`,{forestId:'old',month,type:'stay',units:[],days:{},status:'complete',observedAt:new Date().toISOString()});
+ const result=(await call('/api/availability')).data;
+ assert.equal(result.forests.length,1);assert.equal(result.coverage.regionTotal,1);assert.equal(result.coverage.missingRegions,0);
+ assert.equal(result.dataCoverage.state,'personal-fallback');assert.equal(result.dataCoverage.fallbackScopes,1);
+ assert.equal((await store.db.prepare("SELECT COUNT(*) AS n FROM shared_cache WHERE kind='search'").first()).n,0);
+});
+
+test('a concurrent publication forces a fresh retry instead of overwriting a newer result',async t=>{
+ let shared,interleave=false;
+ class ConcurrentSource extends FixtureSource{
+  async days(scope,ids){const rows=await super.days(scope,ids);if(interleave){interleave=false;const s=await shared.snapshot(`snapshot:${scope.srchDate}:0101:stay`);await shared.publish({snapshots:[{...s,regionId:'1',units:[],days:{}}],expected:await shared.generations(['0101'])});}return rows;}
+ }
+ const {call,store}=await setup(t,ConcurrentSource),month=kstToday().slice(0,6);shared=new SharedStore(store.db);
+ await call('/api/sync',{month,type:'stay'});await finish(call);
+ await call('/api/sync',{month,type:'stay',forestId:'0101'});interleave=true;
+ for(let i=0;i<5;i++)await call('/api/job/step',{});
+ const job=await store.get('job');assert.equal(job.conflictRetries,1);assert.equal(job.status,'running');
+ assert.deepEqual((await shared.snapshot(`snapshot:${month}:0101:stay`)).units,[]);
+ assert.equal((await finish(call)).status,'complete');
+ assert.equal((await shared.snapshot(`snapshot:${month}:0101:stay`)).units.length,6);
 });

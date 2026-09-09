@@ -55,6 +55,10 @@ test('failed sync before acceptance replays only after session check and new CSR
   assert.deepEqual(await h.api('/api/sync', { month: '202609', region: '1', type: 'all', nights: 1 }), { job: accepted });
   assert.deepEqual(h.requests.map(r => r.path), ['/api/sync', '/api/session', '/api/sync']);
   assert.equal(h.requests.at(-1).headers['X-CSRF-TOKEN'], 'new-token');
+  const id=h.requests[0].headers['X-Request-ID'];
+  assert.match(id,/^[0-9a-f-]{36}$/);assert.equal(h.requests.at(-1).headers['X-Request-ID'],id);
+  await h.api('/api/sync',{month:'202609',region:'1',type:'all',nights:1});
+  assert.notEqual(h.requests.at(-1).headers['X-Request-ID'],id);
 });
 
 test('a completed step with a lost response is not repeated', async () => {

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Store } from './store.mjs';
 import { sqlite } from './sqlite.mjs';
 import { createApp } from './app.mjs';
+import { SharedStore } from './shared.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const local = resolve(root, '.local'); mkdirSync(local, { recursive: true, mode: 0o700 });
@@ -13,6 +14,7 @@ const secretPath = resolve(local, 'session.key');
 if (!existsSync(secretPath)) writeFileSync(secretPath, crypto.randomUUID() + crypto.randomUUID(), { mode: 0o600 });
 const db = sqlite(resolve(local, 'forest-gap.sqlite'));
 const store = new Store(db, readFileSync(secretPath, 'utf8')); await store.init();
+await new SharedStore(db).init();
 chmodSync(resolve(local, 'forest-gap.sqlite'), 0o600);
 const api = createApp({ store, env: process.env });
 const port = Number(process.env.PORT || 5178);
