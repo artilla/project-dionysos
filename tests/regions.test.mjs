@@ -70,6 +70,34 @@ test('union removes duplicate forests and keeps latest response metadata togethe
   assert.equal(actual.fetchedAt, newer.fetchedAt);
 });
 
+test('multiple regions retain the connection requirement and aggregate their coverage', async () => {
+  const actual = await fetchRegionAvailability(async path => {
+    const region = new URL('http://local' + path).searchParams.get('region');
+    return result(region, {
+      forests: [], coverage: { discovered: 0, complete: 0, pending: 0, missingRegions: 1, regionTotal: 1 },
+      dataCoverage: { state: 'connect-required', sharedScopes: 0, fallbackScopes: 0, missingScopes: 0, emptyScopes: 0, legacyForests: 0 },
+      personal: { job: null, fallbackKeys: [], forests: {} }
+    });
+  }, 'month=202609&region=1,2');
+  assert.equal(actual.dataCoverage.state, 'connect-required');
+  assert.equal(actual.query.region, '1,2');
+  assert.deepEqual(actual.forests, []);
+  assert.equal(actual.coverage.missingRegions, 2);
+  assert.equal(actual.coverage.regionTotal, 2);
+  assert.deepEqual(actual.regions.map(r => r.region), ['1', '2']);
+});
+
+test('connection requirement takes precedence over personal fallback regardless of region order', async () => {
+  const responses = {
+    '1': result('1', { dataCoverage: { state: 'personal-fallback', fallbackScopes: 1 } }),
+    '2': result('2', { forests: [], dataCoverage: { state: 'connect-required' } })
+  };
+  for (const region of ['1,2', '2,1']) {
+    const actual = await fetchRegionAvailability(async path => responses[new URL('http://local' + path).searchParams.get('region')], 'region=' + region);
+    assert.equal(actual.dataCoverage.state, 'connect-required');
+  }
+});
+
 test('one region failure rejects the whole read instead of publishing incomplete results', async () => {
   const failure = Object.assign(new Error('연결을 확인해주세요.'), { code: 'NETWORK_OFFLINE' });
   await assert.rejects(fetchRegionAvailability(async path => {

@@ -319,7 +319,7 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
       const coverage = { discovered: forests.length, complete, pending, missingRegions: regionIds.filter(r => !knownRegions.includes(r)).length, regionTotal: regionIds.length };
       // connect-required: shared reading is withheld because this browser never
       // connected; it is neither "not collected yet" nor a confirmed empty result.
-      dataCoverage.state = fallbackKeys.length || legacyIds.length ? 'personal-fallback' : !allowed ? 'connect-required' : !read.catalog || !regionIds.length ? 'unavailable' : coverage.missingRegions || dataCoverage.missingScopes || pending ? 'incomplete' : !forests.length || dataCoverage.emptyScopes === dataCoverage.sharedScopes ? 'empty' : 'shared';
+      dataCoverage.state = !allowed ? 'connect-required' : fallbackKeys.length || legacyIds.length ? 'personal-fallback' : !read.catalog || !regionIds.length ? 'unavailable' : coverage.missingRegions || dataCoverage.missingScopes || pending ? 'incomplete' : !forests.length || dataCoverage.emptyScopes === dataCoverage.sharedScopes ? 'empty' : 'shared';
       const times = forests.map(f => f.observedAt).filter(Boolean).sort();
       payload = { query, forests, coverage, dataCoverage, dataVersion: read.dependencies, sourceObservedAt: times[0] || null };
       if (allowed && !fallbackKeys.length && !legacyIds.length && !read.personalCatalog) await shared.cache({ kind: 'search', key: read.key, dependencies: read.dependencies, value: payload, createdAt: read.createdAt, expiresAt: read.createdAt + 10000 }).catch(() => {});

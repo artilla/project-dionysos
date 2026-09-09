@@ -370,10 +370,13 @@ test('source restrictions are not automatically retried or reconnected',async()=
   assert.equal(h.$('cardUpdateNotice').dataset.state,'error');
 });
 
-test('a never-connected browser sees a connect prompt with a connect button instead of a missing-data message',async()=>{
+for (const region of ['all', '1,2']) test(`a never-connected browser sees a connect prompt and opens the dialog for regions ${region}`,async()=>{
   const availability={forests:[],coverage:{discovered:0,complete:0,pending:0,missingRegions:1,regionTotal:1},dataCoverage:{state:'connect-required',sharedScopes:0,fallbackScopes:0,missingScopes:0,emptyScopes:0,legacyForests:0},personal:{job:null,fallbackKeys:[],forests:{}}};
-  const h=await setup({session:{connected:false,configured:false},fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>availability};}});
+  const h=await setup({catalog:multiRegionCatalog,session:{connected:false,configured:false},fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>availability};}});
+  if(region!=='all'){h.chooseRegion('1');h.chooseRegion('2');}
+  const before=h.requests.length;
   await h.app.refresh();
+  assert.deepEqual(h.requests.slice(before).filter(r=>r.path.startsWith('/api/availability?')).map(r=>new URL('http://local'+r.path).searchParams.get('region')),region.split(','));
   assert.match(h.$('coverageNote').textContent,/한 번 연결한 브라우저/);
   assert.doesNotMatch(h.$('coverageNote').textContent,/미조회|모아볼/);
   const empty=h.$('cards').querySelector('.empty');
@@ -383,6 +386,9 @@ test('a never-connected browser sees a connect prompt with a connect button inst
   h.click('[data-recover="connect"]');
   assert.equal(h.$('accountDialog').open,true);assert.equal(h.$('accountTitle').textContent,'숲나들e 연결');
   assert.equal(h.requests.some(r=>r.path==='/api/session/connect'),false,'no empty login attempt without saved credentials');
+  h.click('#cancelAccount');
+  assert.equal(h.$('accountDialog').open,false);assert.equal(h.app.state.region,region);
+  assert.equal(h.$('cards').querySelector('.empty').dataset.state,'connect-required');
 });
 
 test('not-yet-collected and confirmed-empty states keep their own guidance',async()=>{

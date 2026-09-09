@@ -60,7 +60,9 @@ export async function fetchRegionAvailability(api, queryString) {
     for (const key of Object.keys(coverage)) coverage[key] += Number(response.coverage?.[key]) || 0;
   }
   const dataCoverage = responses.some(r => r.dataCoverage) ? Object.fromEntries(['sharedScopes', 'fallbackScopes', 'missingScopes', 'emptyScopes', 'legacyForests'].map(key => [key, responses.reduce((n, r) => n + (r.dataCoverage?.[key] || 0), 0)])) : undefined;
-  if (dataCoverage) dataCoverage.state = responses.some(r => r.dataCoverage?.state === 'personal-fallback') ? 'personal-fallback' : responses.every(r => r.dataCoverage?.state === 'empty') ? 'empty' : responses.some(r => r.dataCoverage?.state === 'incomplete') ? 'incomplete' : 'shared';
+  if (dataCoverage) dataCoverage.state = responses.some(r => r.dataCoverage?.state === 'connect-required') ? 'connect-required'
+    : responses.some(r => r.dataCoverage?.state === 'personal-fallback') ? 'personal-fallback'
+    : responses.every(r => r.dataCoverage?.state === 'empty') ? 'empty' : responses.some(r => r.dataCoverage?.state === 'incomplete') ? 'incomplete' : 'shared';
   return { ...latest, query: { ...latest.query, region }, forests: [...forests.values()], coverage, ...(dataCoverage ? { dataCoverage,
     regions: responses.map(r => ({ region: r.query?.region, dataVersion: r.dataVersion, sourceObservedAt: r.sourceObservedAt })) } : {}) };
 }
