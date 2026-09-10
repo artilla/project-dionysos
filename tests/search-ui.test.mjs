@@ -259,6 +259,31 @@ test('a card detail under multiple result regions reads the selected forest with
   assert.equal(h.app.state.region, '1,2');
 });
 
+test('official detail links preserve the forest and result scope across facility types and day changes', async () => {
+  for (const [type, code] of [['all', null], ['stay', '01'], ['camp', '02']]) {
+    const forest = { ...cardForest(), id: 'ID02030062', regionId: '3' };
+    const h = await setup({ catalog: { ...multiRegionCatalog, regions: [...multiRegionCatalog.regions, { id: '3', name: '충북' }] }, forests: [forest], fetch({ path }) {
+      if (path.startsWith('/api/forests/ID02030062?')) return { ok: true, json: async () => ({ forests: [{ ...forest, dates: { '20261012': [] }, units: [] }] }) };
+    } });
+    h.chooseRegion('1'); h.chooseRegion('3');
+    h.change('sourceMonth', '202609'); h.change('sourceRegion', '9'); h.click('[data-source-type="stay"]');
+    h.click(`[data-type="${type}"]`); await h.app.refresh();
+    h.click('[data-open="ID02030062"]');
+    for (let n = 0; n < 10 && !h.$('detail').querySelector('a.primary'); n++) await settled();
+    const link = h.$('detail').querySelector('a.primary'); assert.ok(link);
+    const url = new URL(link.getAttribute('href'));
+    assert.equal(url.origin, 'https://www.foresttrip.go.kr');
+    assert.equal(url.pathname, '/rep/or/sssn/monthRsrvtStatus.do');
+    assert.deepEqual(Object.fromEntries(url.searchParams), { hmpgId: 'FRIP', menuId: '001004', srchSido: '3', insttId: forest.id, srchMonth: '202610', ...(code ? { upperGoodsClsscCd: code } : {}) });
+    assert.equal(link.getAttribute('target'), '_blank');
+    assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+    assert.match(h.$('detail').querySelector('.detail-notice').textContent, /입실일·인원·숙박일수는 공식 사이트에서 다시 선택/);
+    if (type === 'all') assert.match(h.$('detail').querySelector('.detail-notice').textContent, /숙소 또는 야영장/);
+    h.click('[data-detailday="13"]');
+    assert.equal(h.$('detail').querySelector('a.primary').getAttribute('href'), url.href);
+  }
+});
+
 test('card update uses result conditions, prevents duplicates, and keeps later filter edits', async () => {
   const step = deferred(), reachedStep = deferred();
   const h = await setup({ forests: [cardForest()], sync: input => jobFor({ ...input, status: 'running', remaining: 1 }), step: () => { reachedStep.resolve(); return step.promise; } });
