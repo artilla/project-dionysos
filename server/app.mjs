@@ -1,6 +1,9 @@
 import { Foresttrip, SourceError } from './foresttrip.mjs';
 import { kstToday, monthDates, nextMonth, normalizeDay, normalizeUnit, summarizeForest } from './domain.mjs';
 import { SharedStore, safeSource, cacheKey } from './shared.mjs';
+import { FacilityCache } from './facility-cache.mjs';
+import { forestLocation } from './forest-location.mjs';
+import { NaverBlogSource } from './naver-blogs.mjs';
 
 const typeCode = { stay: '01', camp: '02' };
 const now = () => new Date().toISOString();
@@ -42,7 +45,7 @@ function queryFrom(input, catalog) {
   return query;
 }
 const accountInfo = credentials => ({ configured: !!credentials, accountLabel: credentials ? `${Array.from(credentials.id).slice(0, Math.min(2, credentials.id.length - 1)).join('')}••••` : null });
-export function createApp({ store, sourceFactory = state => new Foresttrip(state), storageLocation = 'local', shared = new SharedStore(store.db) }) {
+export function createApp({ store, sourceFactory = state => new Foresttrip(state), storageLocation = 'local', shared = new SharedStore(store.db), assetStore, waitUntil, facilityCache = new FacilityCache({ db: store.db, assetStore, waitUntil }), naverBlogs = new NaverBlogSource() }) {
   const catalogForRead = async () => await shared.catalog() || await store.get('catalog');
   const forestForRead = async id => await shared.forest(id) || await store.get(`forest:${id}`);
   // Anonymous shared access remains pending a product decision. A retained
@@ -345,7 +348,50 @@ export function createApp({ store, sourceFactory = state => new Foresttrip(state
       if (request.headers.get('sec-fetch-site') === 'cross-site') return response({ error: { code: 'FORBIDDEN', message: '같은 페이지에서 다시 시도해주세요.' } }, 403);
       let csrf = await store.get('appCsrf');
       if (!csrf) { csrf = crypto.randomUUID(); await store.set('appCsrf', csrf); }
-      if (request.method !== 'GET' && (request.headers.get('origin') !== url.origin || request.headers.get('x-csrf-token') !== csrf)) return response({ error: { code: 'FORBIDDEN', message: '페이지를 새로고침한 후 다시 시도해주세요.' } }, 403);
+      if (!['GET', 'HEAD'].includes(request.method) && (request.headers.get('origin') !== url.origin || request.headers.get('x-csrf-token') !== csrf)) return response({ error: { code: 'FORBIDDEN', message: '페이지를 새로고침한 후 다시 시도해주세요.' } }, 403);
+      const locationMatch = path.match(/^\/api\/forests\/([A-Za-z0-9_-]{1,100})\/location$/);
+      if (locationMatch && request.method === 'GET') {
+        if (!await canReadShared()) throw new SourceError('LOCATION_ACCESS_REQUIRED', '휴양림 목록을 먼저 조회해주세요.', 403);
+        if (!await forestForRead(locationMatch[1])) throw new SourceError('NOT_FOUND', '휴양림을 찾지 못했습니다.', 404);
+        return response(await forestLocation({ id: locationMatch[1], shared }));
+      }
+      const naverSearch = path.match(/^\/api\/forests\/([A-Za-z0-9_-]{1,100})\/naver-blogs$/);
+      if (naverSearch && request.method === 'GET') {
+        if (!await canReadShared()) throw new SourceError('NAVER_ACCESS_REQUIRED', '휴양림 목록을 조회한 뒤 후기 검색을 열어주세요.', 403);
+        const forest = await forestForRead(naverSearch[1]);
+        if (!forest?.name) throw new SourceError('FOREST_NOT_FOUND', '조회된 휴양림 목록에서 다시 선택해주세요.', 404);
+        const context = { forest: { id: naverSearch[1], name: forest.name }, query: `${forest.name} 후기` };
+        const sort = url.searchParams.get('sort') || 'sim', rawStart = url.searchParams.get('start') || '1';
+        if (!['sim', 'date'].includes(sort) || !/^[1-9]\d{0,2}$/.test(rawStart) || (Number(rawStart) - 1) % 10 || Number(rawStart) > 991) invalid('검색 정렬과 페이지를 다시 선택해주세요.');
+        try {
+          // Search results are returned to this request only: no shared
+          // cache, database writes, analytics, enrichment or rank changes.
+          return response({ ...context, sort, ...await naverBlogs.search({ query: context.query, sort, start: Number(rawStart) }) });
+        } catch (error) {
+          if (!(error instanceof SourceError)) error = new SourceError('NAVER_UNAVAILABLE', '네이버 검색에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.', 502);
+          return response({ ...context, error: safeError(error) }, error.status);
+        }
+      }
+      const facilityAsset = path.match(/^\/api\/facility-assets\/([a-f0-9]{64})$/);
+      if (facilityAsset && ['GET', 'HEAD'].includes(request.method)) {
+        if (!await canReadShared()) throw new SourceError('FACILITY_ACCESS_REQUIRED', '휴양림을 먼저 조회한 뒤 시설 정보를 열어주세요.', 403);
+        const asset = await facilityCache.asset(facilityAsset[1]);
+        if (!asset) throw new SourceError('ASSET_NOT_FOUND', '저장된 이미지를 찾을 수 없습니다. 시설 정보를 다시 확인해주세요.', 404);
+        const headers = { 'Content-Type': asset.contentType, 'Cache-Control': 'private, no-cache', 'ETag': asset.etag, 'X-Content-Type-Options': 'nosniff' };
+        if (request.headers.get('if-none-match') === asset.etag) return new Response(null, { status: 304, headers });
+        return new Response(request.method === 'HEAD' ? null : asset.bytes, { headers });
+      }
+      const facility = path.match(/^\/api\/forests\/([A-Za-z0-9_-]{1,80})\/units\/([A-Za-z0-9_-]{1,120})$/);
+      if (facility && request.method === 'GET') {
+        if (!await canReadShared()) throw new SourceError('FACILITY_ACCESS_REQUIRED', '휴양림을 먼저 조회한 뒤 시설 정보를 열어주세요.', 403);
+        const query = { forestId: facility[1], unitId: facility[2], type: url.searchParams.get('type') };
+        if (!['stay', 'camp'].includes(query.type)) invalid('시설 종류를 확인해주세요.');
+        // Only units already collected by the app can trigger a source request.
+        const known = await store.db.prepare("SELECT 1 AS found FROM shared_snapshots s, json_each(s.data,'$.units') u WHERE s.forest_id=? AND s.type=? AND json_extract(u.value,'$.id')=? LIMIT 1").bind(query.forestId, query.type, query.unitId).first();
+        const legacy = !known && (await store.list('snapshot:')).some(s => s.forestId === query.forestId && s.type === query.type && s.units?.some(u => u.id === query.unitId));
+        if (!known && !legacy) throw new SourceError('FACILITY_NOT_FOUND', '조회된 시설 목록에서 시설을 다시 선택해주세요.', 404);
+        return response(await facilityCache.get(query));
+      }
       if (path === '/api/session' && request.method === 'GET') {
         const auth = await store.getSecret('auth');
         return response({ connected: !!auth?.connectedAt, connectedAt: auth?.connectedAt || null, ...accountInfo(await savedCredentials()), storageLocation, csrfToken: csrf, catalog: await catalogForRead(), job: publicJob(await store.get('job')) });

@@ -47,6 +47,10 @@ body>a.sr-only:focus{position:fixed;top:8px;left:8px;width:auto;height:auto;clip
 <link rel="stylesheet" href="/regions.css">
 <link rel="stylesheet" href="/account.css">
 <link rel="stylesheet" href="/compact.css">
+<link rel="stylesheet" href="/facilities.css">
+<link rel="stylesheet" href="/naver-entry.css">
+<link rel="stylesheet" href="/leaflet.css">
+<link rel="stylesheet" href="/forest-map.css">
 </head>
 <body>
 <a href="#results" class="sr-only">휴양림 목록으로 이동</a>
@@ -85,9 +89,9 @@ body>a.sr-only:focus{position:fixed;top:8px;left:8px;width:auto;height:auto;clip
       <div class="calendar-bottom"><span id="dateSummary">날짜를 누르면 목록을 좁혀볼 수 있어요</span><button id="clearDate" hidden>해제</button></div></section>
       <div class="sidebar-foot"><span data-icon="leaf"></span><div><strong>조금 느슨한 여행 계획</strong>출발일이 꼭 정해지지 않았다면<br>한 달 전체에서 여유 있는 숲을 찾아보세요.</div></div>
     </aside>
-    <section id="results" aria-labelledby="resultsTitle"><div class="results-top"><div><h2 class="results-title" id="resultsTitle">예약 가능한 휴양림 <em id="resultCount">0곳</em></h2><p class="results-sub" id="resultsSub">한 달 중 머물 수 있는 날이 있는 숲</p></div><label><span class="sr-only">정렬</span><select id="sort" class="sort"><option value="days">가능한 날짜 많은 순</option><option value="name">이름순</option><option value="soon">가장 빠른 날짜순</option></select></label></div>
+    <section id="results" aria-labelledby="resultsTitle"><div class="results-top"><div><h2 class="results-title" id="resultsTitle">예약 가능한 휴양림 <em id="resultCount">0곳</em></h2><p class="results-sub" id="resultsSub">한 달 중 머물 수 있는 날이 있는 숲</p></div><div class="result-view-controls"><div class="result-view-toggle" role="group" aria-label="결과 보기 방식"><button type="button" id="listView" aria-pressed="true" aria-controls="cards">목록</button><button type="button" id="mapView" aria-pressed="false" aria-controls="forestMap"><span data-icon="pin"></span>지도</button></div><label><span class="sr-only">정렬</span><select id="sort" class="sort"><option value="days">가능한 날짜 많은 순</option><option value="name">이름순</option><option value="soon">가장 빠른 날짜순</option></select></label></div></div>
 
-    <div id="resultOrderNotice" class="result-order-notice" hidden><span>업데이트 전 카드 순서 유지</span><button type="button" id="reorderResults" class="text-button">다시 정렬</button></div><div id="cardUpdateNotice" class="card-update-notice" role="status" aria-live="polite" tabindex="-1" hidden></div><div id="resultAnnouncement" class="sr-only" role="status" aria-live="polite"></div><div class="result-grid" id="cards"></div></section>
+    <div id="resultOrderNotice" class="result-order-notice" hidden><span>업데이트 전 카드 순서 유지</span><button type="button" id="reorderResults" class="text-button">다시 정렬</button></div><div id="cardUpdateNotice" class="card-update-notice" role="status" aria-live="polite" tabindex="-1" hidden></div><div id="resultAnnouncement" class="sr-only" role="status" aria-live="polite"></div><section class="forest-map-view" id="forestMap" aria-label="휴양림 지도 보기" hidden></section><div class="result-grid" id="cards"></div></section>
   </div>
   <footer class="footer"><span><strong>숲틈</strong>일상과 여행 사이, 잠깐의 초록.</span><span>조회 시점의 현황 · 최종 예약은 공식 사이트에서 · <a href="https://www.foresttrip.go.kr/main.do" target="_blank" rel="noopener noreferrer">숲나들e 공식 사이트 ↗</a></span></footer>
 </main>

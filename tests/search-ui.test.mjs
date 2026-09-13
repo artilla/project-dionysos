@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { createApiClient } from '../web/connection.js';
+import { createFacilityViewer } from '../web/facilities.js';
 import { normalizeRegions, selectedRegionIds, fetchRegionAvailability, withPersonalState } from '../web/regions.js';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
@@ -31,7 +32,8 @@ async function setup(options = {}) {
     location: { pathname: '/', search: '?month=202610&region=all&type=all&guests=4&nights=1' },
     history: { replaceState(_state, _title, url) { filterUrls.push(url); } }, localStorage: { getItem: () => '[]', setItem(...args) {storageWrites.push(args);} },
     setTimeout(fn, ms) { if ([350,1000,2000,4000].includes(ms)) queueMicrotask(fn); return 1; }, clearTimeout() {},
-    observePrices: () => () => {}, invalidatePrices: id => priceInvalidations.push(id), createApiClient, normalizeRegions, selectedRegionIds, fetchRegionAvailability, withPersonalState,
+    createForestMap: () => ({render: (forests, options) => {document.getElementById("forestMap").hidden = !options.active;}}),
+    observePrices: () => () => {}, invalidatePrices: id => priceInvalidations.push(id), createApiClient, createFacilityViewer, normalizeRegions, selectedRegionIds, fetchRegionAvailability, withPersonalState,
     async fetch(path, init) {
       const body = init.body && JSON.parse(init.body); requests.push({ path, body });
       const override=await options.fetch?.({path,body,job:currentJob,setJob:value=>{currentJob=value;}});if(override!==undefined)return override;
@@ -235,6 +237,15 @@ test('result edits during acceptance and detail/all/resume actions do not apply 
 });
 
 const cardForest = (dates = { '20261012': 3 }) => ({ id: 'forest-1', name: '시험자연휴양림', region: '강원', city: '삼척시', operator: '공립', dates, coverage: 'complete', stale: true, unitCount: 3, observedAt: '2026-09-08T00:00:00Z' });
+
+test('forest detail links to the independent Naver review page in the same tab', async () => {
+  const forest = { ...cardForest(), regionId: '2', units: [] };
+  const h = await setup({ forests: [forest], fetch: async ({ path }) => path.startsWith('/api/forests/forest-1?') ? { ok: true, json: async () => ({ forests: [{ ...forest, dates: { '20261012': [] } }] }) } : undefined });
+  h.click('[data-open="forest-1"]'); await settled();
+  const naver = h.$('detail').querySelector('[data-naver-reviews]');
+  assert.equal(naver.getAttribute('href'), '/naver-reviews.html?forestId=forest-1');
+  assert.equal(naver.getAttribute('target'), null);
+});
 
 test('a card update under multiple result regions submits only that forest and its region', async () => {
   const h = await setup({ catalog: multiRegionCatalog, forests: [{ ...cardForest(), regionId: '2' }] });
@@ -462,4 +473,13 @@ test('not-yet-collected and confirmed-empty states keep their own guidance',asyn
   const empty=await setup({fetch:async({path})=>{if(path.startsWith('/api/availability?'))return {ok:true,json:async()=>({...base,coverage:{discovered:1,complete:1,pending:0,missingRegions:0,regionTotal:1},dataCoverage:{state:'empty'}})};}});
   await empty.app.refresh();
   assert.match(empty.$('coverageNote').textContent,/조회된 시설이 없습니다/);assert.doesNotMatch(empty.$('cards').textContent,/연결이 필요해요/);
+});
+
+test('map/list switch preserves result conditions and propagates filtered results without another search', async()=>{
+ const h=await setup({forests:[cardForest()]});const before=h.requests.length;
+ h.click('#mapView');assert.equal(h.app.state.view,'map');assert.equal(h.$('cards').hidden,true);assert.equal(h.$('forestMap').hidden,false);
+ assert.equal(h.$('mapView').getAttribute('aria-pressed'),'true');assert.match(h.filterUrls.at(-1),/view=map/);assert.equal(h.requests.length,before);
+ h.app.state.search='없는 숲';h.click('#mapView');assert.equal(h.$('forestMap').hidden,true);assert.equal(h.$('cards').hidden,false);
+ h.click('#listView');assert.equal(h.app.state.view,'list');assert.equal(h.$('cards').hidden,false);assert.equal(h.$('forestMap').hidden,true);
+ assert.equal(h.app.state.guests,4);assert.equal(h.app.state.month,'202610');assert.doesNotMatch(h.filterUrls.at(-1),/view=map/);
 });

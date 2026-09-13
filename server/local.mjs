@@ -7,16 +7,25 @@ import { Store } from './store.mjs';
 import { sqlite } from './sqlite.mjs';
 import { createApp } from './app.mjs';
 import { SharedStore } from './shared.mjs';
+import { FacilityCache } from './facility-cache.mjs';
+import { LocalFacilityAssets } from './facility-assets-local.mjs';
+import { loadEnvFile } from 'node:process';
+import { NaverBlogSource } from './naver-blogs.mjs';
+import { isNaverReviewsPage, naverPageHeaders } from './naver-page-policy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+if (existsSync(resolve(root, '.env.local'))) loadEnvFile(resolve(root, '.env.local'));
 const local = resolve(root, '.local'); mkdirSync(local, { recursive: true, mode: 0o700 });
 const secretPath = resolve(local, 'session.key');
 if (!existsSync(secretPath)) writeFileSync(secretPath, crypto.randomUUID() + crypto.randomUUID(), { mode: 0o600 });
 const db = sqlite(resolve(local, 'forest-gap.sqlite'));
 const store = new Store(db, readFileSync(secretPath, 'utf8')); await store.init();
 await new SharedStore(db).init();
+const assetStore = new LocalFacilityAssets(resolve(local, 'facility-images'));
+const facilityCache = new FacilityCache({ db, assetStore });
+await facilityCache.init();
 chmodSync(resolve(local, 'forest-gap.sqlite'), 0o600);
-const api = createApp({ store, env: process.env });
+const api = createApp({ store, env: process.env, facilityCache, naverBlogs: new NaverBlogSource({ clientId: process.env.NAVER_CLIENT_ID, clientSecret: process.env.NAVER_CLIENT_SECRET }) });
 const port = Number(process.env.PORT || 5178);
 const staticRoot = resolve(root, process.env.SERVE_BUILD === '1' ? 'dist/client' : 'web');
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
@@ -32,13 +41,19 @@ const server = createServer(async (req, res) => {
       const result = await api(request); res.writeHead(result.status, Object.fromEntries(result.headers)); res.end(Buffer.from(await result.arrayBuffer())); return;
     }
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405); res.end(); return; }
-    const path = decodeURIComponent(url.pathname);
+    const path = decodeURIComponent(url.pathname === '/naver-reviews' ? '/naver-reviews.html' : url.pathname);
+    const mapAsset = { '/leaflet.js': 'leaflet-src.esm.js', '/leaflet.css': 'leaflet.css' }[path];
+    if (mapAsset) {
+      const body = await readFile(resolve(root, 'node_modules/leaflet/dist', mapAsset));
+      res.writeHead(200, { 'Content-Type': mime[extname(mapAsset)], 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+      res.end(req.method === 'HEAD' ? undefined : body); return;
+    }
     // Serve only the app directory and these two reviewed documents.
     const doc = ['/docs/architecture.html', '/docs/implementation-plan.html'].includes(path);
     const target = doc ? resolve(root, `.${path}`) : resolve(staticRoot, `.${path === '/' ? '/index.html' : path}`);
     if ((!doc && !target.startsWith(staticRoot + '/')) || path.split('/').some(segment => segment.startsWith('.'))) { res.writeHead(404); res.end('Not found'); return; }
     const body = await readFile(target);
-    res.writeHead(200, { 'Content-Type': mime[extname(target)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'" });
+    res.writeHead(200, { 'Content-Type': mime[extname(target)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'", ...(isNaverReviewsPage(path) ? naverPageHeaders : {}) });
     res.end(req.method === 'HEAD' ? undefined : body);
   } catch { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('요청한 파일을 찾을 수 없습니다.'); }
 });

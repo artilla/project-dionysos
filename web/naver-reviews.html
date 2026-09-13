@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>네이버 블로그 후기</title>
+  <link rel="stylesheet" href="/naver-reviews.css">
+</head>
+<body>
+  <main class="reviews-page">
+    <header class="reviews-header">
+      <div class="header-top"><p class="page-label">블로그 후기</p><button type="button" class="quiet-button close-button" data-naver-close><span aria-hidden="true">←</span> 휴양림 목록</button></div>
+      <h1 data-naver-title>휴양림 후기를 불러오고 있어요</h1>
+      <p class="search-query" data-naver-query hidden></p>
+      <div class="source-row"><a class="naver-logo-link" href="https://developers.naver.com" target="_blank" rel="noopener noreferrer" data-naver-attribution><img class="naver-logo" src="/naver-openapi.png" width="1536" height="209" alt="NAVER 오픈 API"></a><span>네이버 블로그 검색 결과</span></div>
+    </header>
+    <section class="search-section" aria-label="네이버 블로그 검색">
+      <div class="search-controls"><label class="sort-label" for="naverSort">정렬 <select id="naverSort" data-naver-sort><option value="sim">정확도순</option><option value="date">최신순</option></select></label><button type="button" class="outline-button" data-naver-reload>다시 조회</button></div>
+      <div class="search-status" data-naver-status role="status" aria-live="polite"></div>
+      <div class="recovery-actions" data-naver-recovery hidden><button type="button" class="outline-button" data-naver-retry>다시 시도</button><a href="https://search.naver.com/?where=blog" target="_blank" rel="noopener noreferrer" data-naver-external hidden>네이버에서 직접 검색 <span aria-hidden="true">↗</span></a><a href="/" data-naver-return hidden>휴양림 목록으로 돌아가기</a></div>
+      <p class="result-count" data-naver-count hidden></p>
+      <ol class="review-results" data-naver-results aria-label="블로그 검색 결과"></ol>
+      <nav class="pagination" aria-label="검색 결과 페이지" data-naver-pagination hidden><button type="button" class="outline-button" data-naver-prev>이전 10건</button><p data-naver-page aria-live="polite"></p><button type="button" class="outline-button" data-naver-next>다음 10건</button></nav>
+      <a class="bottom-source" href="https://search.naver.com/?where=blog" target="_blank" rel="noopener noreferrer" data-naver-bottom-source hidden>네이버 블로그에서 검색 결과 보기 <span aria-hidden="true">↗</span></a>
+    </section>
+  </main>
+  <script type="module" src="/naver-reviews.js"></script>
+</body>
+</html>
